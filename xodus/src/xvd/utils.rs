@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use ntfs::{Ntfs, NtfsFile, NtfsReadSeek};
 use rsa::sha2::{self, Digest};
-use smbioslib::CpuStatus::UserDisabled;
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncSeekExt},
@@ -525,6 +523,7 @@ enum FetchReason {
     Missing,
     LengthMismatch,
     ShaMismatch,
+    ReadErr,
 }
 
 struct UnpackPlan<'T> {
@@ -595,11 +594,11 @@ pub fn unpack_file(
                     None => page_in_section as u32 + p as u32,
                 };
                 if let Err(_) = if p == page_length - 1 {
-                    file.read(&mut buf[..(fs.data_length as usize % PAGE_SIZE as usize)]).map(|_| ())
+                    file.read_exact(&mut buf[..(fs.data_length as usize % PAGE_SIZE as usize)]).map(|_| ())
                 } else {
                     file.read_exact(&mut buf)
                 } {
-                    plan.push(UnpackPlan { reason: FetchReason::ShaMismatch, section, file: fs, final_path});
+                    plan.push(UnpackPlan { reason: FetchReason::ReadErr, section, file: fs, final_path});
                     break;
                 }
 
@@ -631,10 +630,8 @@ pub fn unpack_file(
                 // sha.update(block);
                 // let calculated_expected = sha.finalize();
 
-                if calculated[..0x14] == section.data_hashs[page_in_section as usize + p as usize] {
-                    println!("page checksum {} ok", p);
-                } else {
-                    println!("page checksum {} not ok", p);
+                if calculated[..0x14] != section.data_hashs[page_in_section as usize + p as usize] {
+                    println!("{} page checksum {} not ok", final_path.display(), p);
                     plan.push(UnpackPlan { reason: FetchReason::ShaMismatch, section, file: fs, final_path});
                     break;
                 }

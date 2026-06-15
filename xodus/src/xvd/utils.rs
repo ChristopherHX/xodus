@@ -1,15 +1,19 @@
+use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use ntfs::{Ntfs, NtfsFile, NtfsReadSeek};
+use rsa::sha2::{self, Digest};
+use smbioslib::CpuStatus::UserDisabled;
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncSeekExt},
 };
-use zerocopy::transmute;
+use zerocopy::{IntoBytes, transmute};
 
-use crate::xvd::crypt::SectionReader;
+use crate::models::xvd::{PAGE_SIZE, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader};
+use crate::xvd::crypt::{SectionReader, transform_page_xts};
 use crate::xvd::math::{
     bytes_to_pages, calculate_hash_block_num_for_block_num, offset_to_page_number,
 };
@@ -58,8 +62,7 @@ impl Read for XvdStream {
         let to_read = remaining.min(buf.len());
 
         if let Some(encryption_info) = &self.encryption_info {
-            let it = encryption_info.encrypted_sections.iter();
-            for s in it {
+            for s in &encryption_info.encrypted_sections {
                 if self.offset + current >= s.section_offset
                     && self.offset + current < s.section_offset + s.section_length
                 {
@@ -145,6 +148,7 @@ fn extract_ntfs_file<T: Read + Seek>(
     file: &NtfsFile<'_>,
     output_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", output_path.to_string_lossy());
     let mut output_file = std::fs::File::create(output_path)?;
 
     if let Some(data_item) = file.data(fs, "") {
@@ -160,6 +164,22 @@ fn extract_ntfs_file<T: Read + Seek>(
             }
 
             output_file.write_all(&buf[..bytes_read])?;
+        }
+
+        match data_value {
+            ntfs::attribute_value::NtfsAttributeValue::Resident(ntfs_resident_attribute_value) => todo!(),
+            ntfs::attribute_value::NtfsAttributeValue::NonResident(ntfs_non_resident_attribute_value) => {
+                for r in ntfs_non_resident_attribute_value.data_runs() {
+                    if let Err(e) = r {
+                        return Err(Box::new(e));
+                    }
+                    let d = r.unwrap();
+                    let dp = d.data_position();
+                    let len = d.allocated_size();
+                    println!("data location {dp} + {len}");
+                }
+            },
+            ntfs::attribute_value::NtfsAttributeValue::AttributeListNonResident(ntfs_attribute_list_non_resident_attribute_value) => todo!(),
         }
     }
 
@@ -209,7 +229,17 @@ pub struct XvdFile {
     encrypted_section_infos: Vec<EncryptedSectionInfo>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub struct FileSegment {
+    file_name: String,
+    data_offset: u64,
+    data_length: u64,
+    page_offset: u64,
+    page_length: u64,
+    keep_encrypted: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct EncryptedSectionInfo {
     section_offset: u64,
     section_length: u64,
@@ -220,6 +250,22 @@ pub struct EncryptedSectionInfo {
     // If integrity is enabled, this must contain one entry per page in the section.
     // If integrity is disabled, use page_in_section as the data unit instead.
     data_units: Option<Vec<u32>>,
+
+    files: Vec<FileSegment>,
+    data_hashs: Vec<[u8; 20]>,
+    data_hash_infos: Vec<DataHashInfo>,
+    first_segment_index: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DataHashInfo {
+    data_hash: [u8; 20],
+    data_unit: u32,
+    data_to_hash_offset: u64,
+}
+
+struct SegmentMetadataInfo {
+    segment: XvdSegmentMetadataSegment,
 }
 
 pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Error>> {
@@ -262,6 +308,7 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
     let mut region_specifiers: Vec<XvcRegionSpecifier> = Vec::new();
     let mut region_presence_info: Vec<u8> = Vec::new();
 
+    let mut info: Option<XvcInfo> = None;
     // TODO: Check if we have proper content type
     if xvc_data_length > 0 {
         file.seek(std::io::SeekFrom::Start(xvc_info_offset))
@@ -269,6 +316,7 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
             .expect("Unable to seek");
         file.read_exact(&mut info_buffer).await.unwrap();
         let xvc_info: XvcInfo = transmute!(info_buffer);
+        // info = Some(xvc_info);
 
         let region_count = xvc_info.region_count;
         let update_segment_count = xvc_info.update_segment_count;
@@ -331,9 +379,9 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
     };
 
     let sfile = std::fs::File::open(path).unwrap();
+
     let mut enc_sections: Vec<EncryptedSectionInfo> = vec![];
-    let it = region_headers.iter();
-    for h in it {
+    for h in &region_headers {
         // let ch = h.clone();
         let key_id = h.key_id;
         let offset = h.offset;
@@ -351,6 +399,8 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
         }
 
         let mut data_units: Vec<u32> = vec![];
+        let mut data_hashs: Vec<[u8; 20]> = vec![];
+        let mut data_hash_infos : Vec<DataHashInfo> = vec![];
         let start_page = offset_to_page_number(h.offset - user_data_offset);
         let num_pages = bytes_to_pages(length);
         for page in 0..num_pages {
@@ -364,11 +414,36 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
                 false,
                 false,
             );
-            let read_offset =
-                hash_tree_offset + page_number_to_offset(hash_block) + (entry_num * 0x18) + 0x14;
+            let hash_entry_offset =
+                hash_tree_offset + page_number_to_offset(hash_block) + (entry_num * 0x18);
+            let read_offset= hash_entry_offset + 0x14;
             sfile.read_exact_at(&mut buf, read_offset).unwrap();
             let u = u32::from_le_bytes(buf);
             data_units.push(u);
+
+            let mut block_hash = [0u8; 0x14];
+            sfile.read_exact_at(&mut block_hash, hash_entry_offset).unwrap();
+            data_hashs.push(block_hash);
+
+            let data_to_hash_offset = page_number_to_offset(start_page + page) + user_data_offset;
+
+            data_hash_infos.push(DataHashInfo { data_hash: block_hash, data_unit: u, data_to_hash_offset: data_to_hash_offset });
+
+            if true {
+                continue;
+            }
+
+            let mut block = [0u8; 4096];
+            sfile.read_exact_at(&mut block, data_to_hash_offset).unwrap();
+
+            let mut sha = sha2::Sha256::new();
+            sha.update(block);
+            let calculated = sha.finalize();
+            if calculated[..0x14] == block_hash {
+                println!("page checksum {} ok", start_page + page)
+            } else {
+                println!("page checksum {} not ok", start_page + page)
+            }
         }
 
         enc_sections.push(EncryptedSectionInfo {
@@ -377,14 +452,86 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
             header_id: h.region_id,
             vduid: xvd_header.vduid[..8].try_into().unwrap(),
             data_units: Some(data_units.clone()),
+            data_hashs: data_hashs,
+            data_hash_infos: data_hash_infos,
+            first_segment_index: h.first_segment_index,
+            files: vec![],
         });
     }
+
+    let mut user_data_header_buf = [0u8; 128/8];
+    sfile.read_exact_at(&mut user_data_header_buf, user_data_offset).unwrap();
+    let user_data_header : XvdUserDataHeader = transmute!(user_data_header_buf);
+    if user_data_header.t == 0 {
+        let mut off = user_data_offset + user_data_header.length as u64;
+        let mut user_data_package_files_header_buf = [0u8; 4224/8];
+        sfile.read_exact_at(&mut user_data_package_files_header_buf, off).unwrap();
+        let user_data_package_files_header : XvdUserDataPackageFilesHeader = transmute!(user_data_package_files_header_buf);
+        let c = user_data_package_files_header.file_count;
+        let fullname = user_data_package_files_header.package_full_name;
+        println!("package {} / file count {}", String::from_utf16(&fullname).unwrap(), c);
+        off += user_data_package_files_header_buf.len() as u64;
+        for _ in 0..user_data_package_files_header.file_count {
+            let mut user_data_package_files_header_buf = [0u8; 4224/8];
+            sfile.read_exact_at(&mut user_data_package_files_header_buf, off).unwrap();
+            let user_data_package_file_entry : XvdUserDataPackageFileEntry = transmute!(user_data_package_files_header_buf);
+            off += user_data_package_files_header_buf.len() as u64;
+            let o  = user_data_package_file_entry.offset;
+            let s: u32  = user_data_package_file_entry.size;
+            let fullname = user_data_package_file_entry.file_path;
+            let end = fullname.iter().position(|&c| c == 0).unwrap_or(fullname.len());
+            let pfull_name: String = String::from_utf16(&fullname[..end]).unwrap();
+            println!("file {} / file offset {} size {}", pfull_name, o, s);
+
+            if pfull_name == "SegmentMetadata.bin" {                
+                let mut buf = [0u8; 800/8];
+                sfile.read_exact_at(&mut buf, user_data_offset + user_data_header_buf.len() as u64 + o as u64).unwrap();
+                let segment_header : XvdSegmentMetadataHeader = transmute!(buf);
+                let paths_offset = segment_header.header_length as u64 + segment_header.segment_count as u64 * 0x10;
+                for section in &mut enc_sections {
+                    let mut page_offset = section.section_offset.div_ceil(PAGE_SIZE as u64);
+                    for segment_no in section.first_segment_index..segment_header.segment_count {
+                        let mut buf = [0u8; 128/8];
+                        sfile.read_exact_at(&mut buf, (user_data_offset + user_data_header_buf.len() as u64 + o as u64 + segment_header.header_length as u64) as u64 + segment_no as u64 * 0x10).unwrap();
+                        let segment : XvdSegmentMetadataSegment = transmute!(buf);
+                        let s = segment.path_length;
+                        let mut buf = vec![0u16, 0];
+                        buf.resize(s as usize, 0);
+                        sfile.read_exact_at(buf.as_mut_bytes(), (user_data_offset + o as u64 + user_data_header_buf.len() as u64 + paths_offset + segment.path_offset as u64) as u64).unwrap();
+                        let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
+                        println!("{segment_no}/{page_offset} {} {}", if segment.flags == 1 { "E" } else { " " }, file_name);
+                        let page_length = if segment.filesize == 0 { PAGE_SIZE as u64 } else { segment.filesize.div_ceil(PAGE_SIZE as u64) };
+                        if !(page_offset * (PAGE_SIZE as u64) < section.section_offset + section.section_length) {
+                            break;
+                        }
+                        section.files.push(FileSegment { file_name, data_offset: page_offset * PAGE_SIZE as u64, data_length: segment.filesize, page_offset, page_length, keep_encrypted: segment.flags == 1 });
+                        page_offset += page_length;
+                    }
+                }
+            }
+        }
+    }
+
     Ok(XvdFile {
         content_id: uuid::Uuid::from_bytes_le(xvd_header.vduid).to_string(),
         header: xvd_header,
         drive_data_offset,
         encrypted_section_infos: enc_sections,
     })
+}
+
+#[derive(Debug)]
+enum FetchReason {
+    Missing,
+    LengthMismatch,
+    ShaMismatch,
+}
+
+struct UnpackPlan<'T> {
+    reason: FetchReason,
+    section: &'T EncryptedSectionInfo,
+    file: &'T FileSegment,
+    final_path: PathBuf,
 }
 
 pub fn unpack_file(
@@ -395,6 +542,116 @@ pub fn unpack_file(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sfile = std::fs::File::open(path)?;
     let block_size = 4096; //xvd.header.block_size;
+
+    let extract_root = PathBuf::from(destination);
+
+    let mut tweak_key = [0u8; 16];
+    let mut data_key = [0u8; 16];
+    tweak_key.copy_from_slice(&full_key[..16]);
+    data_key.copy_from_slice(&full_key[16..]);
+
+    let enc_s = xvd.encrypted_section_infos.to_vec();
+
+    let mut plan: Vec<UnpackPlan> = vec![]; 
+    for section in &xvd.encrypted_section_infos {
+        let mut xvdStream = XvdStream {
+            file: sfile.try_clone().unwrap(),
+            offset: section.section_offset,
+            end_offset: section.section_offset + section.section_length,
+            encryption_info: Some(XvdEncryptionInfo {
+                full_key,
+                encrypted_sections: enc_s.to_vec(),
+            }),
+        };
+        for fs in &section.files {
+            let page_offset = fs.page_offset;
+            let page_length = fs.page_length;
+            let page_in_section = page_offset - section.section_offset.div_ceil(PAGE_SIZE as u64);
+            
+            let path = fs.file_name.replace("\\", "/");
+            let final_path = extract_root.join(path);
+            let metadata = std::fs::metadata(&final_path);
+            if let Err(_) = metadata {
+                plan.push(UnpackPlan { reason: FetchReason::Missing, section, file: fs, final_path });
+                continue;
+            }
+            let metadata = metadata.unwrap();
+            if metadata.len() != fs.data_length {
+                plan.push(UnpackPlan { reason: FetchReason::LengthMismatch, section, file: fs, final_path });
+                continue;
+            }
+            let file: Result<std::fs::File, Error> = std::fs::File::open(&final_path);
+            if let Err(_) = file {
+                plan.push(UnpackPlan { reason: FetchReason::Missing, section, file: fs, final_path });
+                continue;
+            }
+            let mut file = file.unwrap();
+
+            for p in 0..page_length {
+                let mut buf = [0u8; PAGE_SIZE as usize];
+                let data_unit = match &section.data_units {
+                    Some(units) => *units
+                        .get(page_in_section as usize + p as usize).unwrap(),
+                    None => page_in_section as u32 + p as u32,
+                };
+                if let Err(_) = if p == page_length - 1 {
+                    file.read(&mut buf[..(fs.data_length as usize % PAGE_SIZE as usize)]).map(|_| ())
+                } else {
+                    file.read_exact(&mut buf)
+                } {
+                    plan.push(UnpackPlan { reason: FetchReason::ShaMismatch, section, file: fs, final_path});
+                    break;
+                }
+
+                // let mut expected_buf = [0u8; PAGE_SIZE as usize];
+                // xvdStream.seek(SeekFrom::Start(page_in_section * PAGE_SIZE as u64)).unwrap();
+                // xvdStream.read_exact(&mut expected_buf).unwrap();
+
+                let encrypted = transform_page_xts(&buf, data_unit, section.header_id, section.vduid, data_key, tweak_key, true).unwrap();
+
+                let mut sha = sha2::Sha256::new();
+                sha.update(encrypted);
+                let calculated = sha.finalize();
+
+                // let info = &section.data_hash_infos[page_in_section as usize + p as usize];
+
+                // let mut block: [u8; 4096] = [0u8; 4096];
+                // sfile.read_exact_at(&mut block, info.data_to_hash_offset).unwrap();
+
+                // let decrypted = transform_page_xts(&block, data_unit, section.header_id, section.vduid, data_key, tweak_key, false).unwrap();
+                // let reencrypted = transform_page_xts(&decrypted, data_unit, section.header_id, section.vduid, data_key, tweak_key, true).unwrap();
+
+                // if block == reencrypted {
+                //     println!("data match")
+                // } else {
+                //     println!("data mismatch")
+                // }
+                // 
+                // let mut sha = sha2::Sha256::new();
+                // sha.update(block);
+                // let calculated_expected = sha.finalize();
+
+                if calculated[..0x14] == section.data_hashs[page_in_section as usize + p as usize] {
+                    println!("page checksum {} ok", p);
+                } else {
+                    println!("page checksum {} not ok", p);
+                    plan.push(UnpackPlan { reason: FetchReason::ShaMismatch, section, file: fs, final_path});
+                    break;
+                }
+
+                // if calculated_expected[..0x14] == section.data_hashs[page_in_section as usize + p as usize] {
+                //     println!("page expected checksum {} ok", p)
+                // } else {
+                //     println!("page expected checksum {} not ok", p)
+                // }
+
+            }
+        }
+    }
+    for e in &plan {
+        println!("{} {:?}", e.final_path.display(), e.reason);
+    }
+    return Ok(());
     let gp = gpt::GptConfig::new()
         .writable(false)
         .logical_block_size(if block_size == 512 {

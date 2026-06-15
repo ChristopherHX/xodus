@@ -1,9 +1,8 @@
-use zerocopy::FromBytes;
+use zerocopy::{FromBytes};
 
 use crate::{
     models::xvd::{
-        XvdVolumeFlags,
-        constants::{LEGACY_SECTOR_SIZE, SECTOR_SIZE, XVD_HEADER_INCL_SIGNATURE_SIZE},
+        XvdVolumeFlags, constants::{LEGACY_SECTOR_SIZE, SECTOR_SIZE, XVD_HEADER_INCL_SIGNATURE_SIZE}
     },
     xvd::math::{bytes_to_pages, calculate_number_of_hash_pages, page_number_to_offset},
 };
@@ -214,4 +213,51 @@ pub struct XvcRegionHeader {
     pub unknown_68: u64,
     pub unknown_70: u64,
     pub unknown_78: u64,
+}
+
+#[derive(FromBytes)]
+#[repr(C, packed)]
+pub struct XvdUserDataHeader {
+    pub length : u32,
+    pub version : u32,
+    pub t : u32,
+    pub unknown : u32,
+}
+
+#[derive(FromBytes)]
+#[repr(C, packed)]
+pub struct XvdUserDataPackageFilesHeader {
+    pub version : u32,
+    pub package_full_name: [u16; 260], // UTF-16
+    pub file_count : u32,
+}
+
+#[derive(FromBytes)]
+#[repr(C, packed)]
+pub struct XvdUserDataPackageFileEntry {
+    pub file_path: [u16; 260], // UTF-16
+    pub size : u32,
+    pub offset : u32,
+}
+
+#[derive(FromBytes)]
+#[repr(C, packed)]
+pub struct XvdSegmentMetadataHeader {
+    pub magic : u32,
+    pub version0 : u32,
+    pub version1 : u32,
+    pub header_length : u32,
+    pub segment_count : u32,
+    pub file_paths_length : u32,
+    pub pduid: [u8; 0x10],
+    pub unknown: [u8; 0x3c],
+}
+
+#[derive(FromBytes)]
+#[repr(C, packed)]
+pub struct XvdSegmentMetadataSegment {
+    pub flags : u16,
+    pub path_length : u16,
+    pub path_offset : u32,
+    pub filesize : u64,
 }

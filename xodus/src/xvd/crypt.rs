@@ -113,13 +113,14 @@ impl<R: PageSource> SectionReader<R> {
         self.inner.seek(SeekFrom::Start(file_offset))?;
         self.inner.read_exact(&mut ciphertext)?;
 
-        let plaintext = decrypt_page_xts(
+        let plaintext = transform_page_xts(
             &ciphertext,
             data_unit,
             self.header_id,
             self.vduid,
             self.data_key,
             self.tweak_key,
+            false,
         )?;
 
         self.cached_page_plaintext.copy_from_slice(&plaintext);
@@ -128,13 +129,14 @@ impl<R: PageSource> SectionReader<R> {
     }
 }
 
-fn decrypt_page_xts(
+pub fn transform_page_xts(
     input: &[u8; PAGE_SIZE],
     data_unit: u32,
     header_id: u32,
     vduid: [u8; 8],
     data_key: [u8; 16],
     tweak_key: [u8; 16],
+    encrypt: bool,
 ) -> io::Result<[u8; PAGE_SIZE]> {
     let data_cipher = Aes128::new((&data_key).into());
     let tweak_cipher = Aes128::new((&tweak_key).into());
@@ -159,7 +161,12 @@ fn decrypt_page_xts(
 
         let mut block = aes::Block::default();
         block.copy_from_slice(&out[off..off + 16]);
-        data_cipher.decrypt_block(&mut block);
+        if encrypt {
+            data_cipher.encrypt_block(&mut block);
+        } else {
+            data_cipher.decrypt_block(&mut block);
+        }
+        
         out[off..off + 16].copy_from_slice(&block);
 
         encrypted_tweak = gf_mul_x(encrypted_tweak);

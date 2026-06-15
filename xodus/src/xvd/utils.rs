@@ -593,9 +593,16 @@ pub fn unpack_file(
                         .get(page_in_section as usize + p as usize).unwrap(),
                     None => page_in_section as u32 + p as u32,
                 };
+                let len_read: usize;
                 if let Err(_) = if p == page_length - 1 {
-                    file.read_exact(&mut buf[..(fs.data_length as usize % PAGE_SIZE as usize)]).map(|_| ())
+                    len_read = fs.data_length as usize % PAGE_SIZE as usize;
+                    if len_read == 0 {
+                        // Do not compare garbage?
+                        break;
+                    }
+                    file.read_exact(&mut buf[..len_read])
                 } else {
+                    len_read = buf.len();
                     file.read_exact(&mut buf)
                 } {
                     plan.push(UnpackPlan { reason: FetchReason::ReadErr, section, file: fs, final_path});
@@ -631,6 +638,8 @@ pub fn unpack_file(
                 // let calculated_expected = sha.finalize();
 
                 if calculated[..0x14] != section.data_hashs[page_in_section as usize + p as usize] {
+                    println!("BEGIN {} page checksum {} not ok", final_path.display(), p);
+                    println!("size {} lenRead {len_read}", fs.data_length);
                     let mut block: [u8; 4096] = [0u8; 4096];
                     sfile.read_exact_at(&mut block, info.data_to_hash_offset).unwrap();
 
@@ -650,10 +659,10 @@ pub fn unpack_file(
                     } else {
                         println!("page expected checksum {} not ok", p)
                     }
-                    // for (i, (&dec, &raw)) in decrypted.iter().zip(buf.iter()).enumerate() {
-                    //     println!("{i:08x}: {dec:02x}  {raw:02x}");
-                    // }
-                    println!("{} page checksum {} not ok", final_path.display(), p);
+                    for (i, (&dec, &raw)) in decrypted.iter().zip(buf.iter()).enumerate() {
+                        println!("{i:08x}: {dec:02x}  {raw:02x}");
+                    }
+                    println!("END {} page checksum {} not ok", final_path.display(), p);
                     plan.push(UnpackPlan { reason: FetchReason::ShaMismatch, section, file: fs, final_path});
                     break;
                 }

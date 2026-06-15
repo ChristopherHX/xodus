@@ -498,7 +498,7 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
                         sfile.read_exact_at(buf.as_mut_bytes(), (user_data_offset + o as u64 + user_data_header_buf.len() as u64 + paths_offset + segment.path_offset as u64) as u64).unwrap();
                         let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
                         println!("{segment_no}/{page_offset} {} {}", if segment.flags == 1 { "E" } else { " " }, file_name);
-                        let page_length = if segment.filesize == 0 { PAGE_SIZE as u64 } else { segment.filesize.div_ceil(PAGE_SIZE as u64) };
+                        let page_length = if segment.filesize == 0 { 1 } else { segment.filesize.div_ceil(PAGE_SIZE as u64) };
                         if !(page_offset * (PAGE_SIZE as u64) < section.section_offset + section.section_length) {
                             break;
                         }
@@ -549,19 +549,19 @@ pub fn unpack_file(
     tweak_key.copy_from_slice(&full_key[..16]);
     data_key.copy_from_slice(&full_key[16..]);
 
-    let enc_s = xvd.encrypted_section_infos.to_vec();
+    // let enc_s = xvd.encrypted_section_infos.to_vec();
 
     let mut plan: Vec<UnpackPlan> = vec![]; 
     for section in &xvd.encrypted_section_infos {
-        let mut xvdStream = XvdStream {
-            file: sfile.try_clone().unwrap(),
-            offset: section.section_offset,
-            end_offset: section.section_offset + section.section_length,
-            encryption_info: Some(XvdEncryptionInfo {
-                full_key,
-                encrypted_sections: enc_s.to_vec(),
-            }),
-        };
+        // let mut xvdStream = XvdStream {
+        //     file: sfile.try_clone().unwrap(),
+        //     offset: section.section_offset,
+        //     end_offset: section.section_offset + section.section_length,
+        //     encryption_info: Some(XvdEncryptionInfo {
+        //         full_key,
+        //         encrypted_sections: enc_s.to_vec(),
+        //     }),
+        // };
         for fs in &section.files {
             let page_offset = fs.page_offset;
             let page_length = fs.page_length;
@@ -612,7 +612,7 @@ pub fn unpack_file(
                 sha.update(encrypted);
                 let calculated = sha.finalize();
 
-                // let info = &section.data_hash_infos[page_in_section as usize + p as usize];
+                let info = &section.data_hash_infos[page_in_section as usize + p as usize];
 
                 // let mut block: [u8; 4096] = [0u8; 4096];
                 // sfile.read_exact_at(&mut block, info.data_to_hash_offset).unwrap();
@@ -631,6 +631,28 @@ pub fn unpack_file(
                 // let calculated_expected = sha.finalize();
 
                 if calculated[..0x14] != section.data_hashs[page_in_section as usize + p as usize] {
+                    let mut block: [u8; 4096] = [0u8; 4096];
+                    sfile.read_exact_at(&mut block, info.data_to_hash_offset).unwrap();
+
+                    let decrypted = transform_page_xts(&block, data_unit, section.header_id, section.vduid, data_key, tweak_key, false).unwrap();
+                    let reencrypted = transform_page_xts(&decrypted, data_unit, section.header_id, section.vduid, data_key, tweak_key, true).unwrap();
+
+                    if block == reencrypted {
+                        println!("data match")
+                    } else {
+                        println!("data mismatch")
+                    }
+                    let mut sha = sha2::Sha256::new();
+                    sha.update(block);
+                    let calculated_expected = sha.finalize();
+                    if calculated_expected[..0x14] == section.data_hashs[page_in_section as usize + p as usize] {
+                        println!("page expected checksum {} ok", p)
+                    } else {
+                        println!("page expected checksum {} not ok", p)
+                    }
+                    // for (i, (&dec, &raw)) in decrypted.iter().zip(buf.iter()).enumerate() {
+                    //     println!("{i:08x}: {dec:02x}  {raw:02x}");
+                    // }
                     println!("{} page checksum {} not ok", final_path.display(), p);
                     plan.push(UnpackPlan { reason: FetchReason::ShaMismatch, section, file: fs, final_path});
                     break;

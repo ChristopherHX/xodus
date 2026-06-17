@@ -12,7 +12,8 @@ pub async fn run(client: &reqwest::Client, path: String, destination: String, ma
 
         xvd
     })
-    .await.unwrap();
+    .await
+    .unwrap();
 
     let license = get_license(client, xvd.content_id.clone(), market).await;
     if let Err(err) = license {

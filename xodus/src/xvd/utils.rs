@@ -30,6 +30,7 @@ use crate::{
 };
 
 const DEFAULT_HTTP_READ_AHEAD_BYTES: usize = 4 * 1024 * 1024;
+const SMALL_FORWARD_SEEK_LIMIT: usize = 4 * 1024 * 1024;
 
 fn seek_target(current: u64, len: u64, pos: SeekFrom) -> io::Result<u64> {
     let new_offset = match pos {
@@ -292,6 +293,48 @@ impl HttpFile {
         Ok(())
     }
 
+    fn skip_with_active_stream(&mut self, skip: usize) -> io::Result<bool> {
+        if skip == 0 {
+            return Ok(true);
+        }
+
+        let Some(active) = self.active.as_mut() else {
+            return Ok(false);
+        };
+
+        let available = active.end_offset.saturating_sub(active.next_offset) as usize;
+        if skip > available {
+            return Ok(false);
+        }
+
+        let mut remaining = skip;
+        let mut scratch = [0u8; 8192];
+
+        while remaining > 0 {
+            let chunk_len = remaining.min(scratch.len());
+            let read = active.response.read(&mut scratch[..chunk_len])?;
+            if read == 0 {
+                self.active = None;
+                return Err(Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "HTTP response ended while skipping forward in the active range",
+                ));
+            }
+
+            let chunk_start = active.next_offset;
+            active.next_offset += read as u64;
+            self.cache.append(chunk_start, &scratch[..read]);
+            remaining -= read;
+        }
+
+        if active.next_offset >= active.end_offset {
+            self.active = None;
+        }
+
+        self.pos += skip as u64;
+        Ok(true)
+    }
+
     fn read_from_cache(&mut self, buf: &mut [u8]) -> usize {
         let read = self.cache.read_into(self.pos, buf);
         self.pos += read as u64;
@@ -371,6 +414,22 @@ impl Read for HttpFile {
 impl Seek for HttpFile {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let new_pos = seek_target(self.pos, self.len, pos)?;
+
+        if new_pos == self.pos {
+            return Ok(self.pos);
+        }
+
+        if new_pos > self.pos {
+            if self.cache.contains(new_pos) {
+                self.pos = new_pos;
+                return Ok(self.pos);
+            }
+
+            let skip = (new_pos - self.pos) as usize;
+            if skip <= SMALL_FORWARD_SEEK_LIMIT && self.skip_with_active_stream(skip)? {
+                return Ok(self.pos);
+            }
+        }
 
         if let Some(active) = &self.active {
             let can_reuse_stream = new_pos == active.next_offset
@@ -620,9 +679,7 @@ trait ReadExactAt: Read + Seek {
 
 impl<T: Read + Seek> ReadExactAt for T {}
 
-pub fn parse_file<T: ReadExactAt>(
-    mut file: T,
-) -> Result<XvdFile, Box<dyn std::error::Error>> {
+pub fn parse_file<T: ReadExactAt>(mut file: T) -> Result<XvdFile, Box<dyn std::error::Error>> {
     let mut header_buffer = [0u8; 4096];
     let mut info_buffer = [0u8; 0xDA8];
 
@@ -864,22 +921,24 @@ pub fn parse_file<T: ReadExactAt>(
                 let segment_header: XvdSegmentMetadataHeader = transmute!(buf);
                 let paths_offset = segment_header.header_length as u64
                     + segment_header.segment_count as u64 * 0x10;
+                let mut seg_metadata: Vec<u8> = vec![];
+                seg_metadata.resize(segment_header.segment_count as usize * 0x10, 0);
+                sfile
+                    .read_exact_at(
+                        &mut seg_metadata,
+                        (user_data_offset
+                            + user_data_header_buf.len() as u64
+                            + o as u64
+                            + segment_header.header_length as u64) as u64                    )
+                    .unwrap();
                 for section in &mut enc_sections {
                     let mut page_offset = section.section_offset.div_ceil(PAGE_SIZE as u64);
                     for segment_no in section.first_segment_index..segment_header.segment_count {
-                        let mut buf = [0u8; 128 / 8];
-                        sfile
-                            .read_exact_at(
-                                &mut buf,
-                                (user_data_offset
-                                    + user_data_header_buf.len() as u64
-                                    + o as u64
-                                    + segment_header.header_length as u64)
-                                    as u64
-                                    + segment_no as u64 * 0x10,
-                            )
-                            .unwrap();
-                        let segment: XvdSegmentMetadataSegment = transmute!(buf);
+                        let start = segment_no as usize * 0x10;
+                        let end = start + 0x10;
+
+                        let bytes: [u8; 0x10] = seg_metadata[start..end].try_into().unwrap();
+                        let segment: XvdSegmentMetadataSegment = transmute!(bytes);
                         let s = segment.path_length;
                         let mut buf = vec![0u16, 0];
                         buf.resize(s as usize, 0);

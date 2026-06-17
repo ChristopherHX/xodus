@@ -1,7 +1,13 @@
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
+use reqwest::{
+    IntoUrl, StatusCode, Url, blocking,
+    header::{CONTENT_RANGE, RANGE},
+};
+
+use gpt::DiskDevice;
 use ntfs::{Ntfs, NtfsFile, NtfsReadSeek};
 use rsa::sha2::{self, Digest};
 use tokio::{
@@ -10,7 +16,10 @@ use tokio::{
 };
 use zerocopy::{IntoBytes, transmute};
 
-use crate::models::xvd::{PAGE_SIZE, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader};
+use crate::models::xvd::{
+    PAGE_SIZE, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader,
+    XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+};
 use crate::xvd::crypt::{SectionReader, transform_page_xts};
 use crate::xvd::math::{
     bytes_to_pages, calculate_hash_block_num_for_block_num, offset_to_page_number,
@@ -19,6 +28,362 @@ use crate::{
     models::xvd::{XvcInfo, XvcRegionHeader, XvcRegionSpecifier, XvdHeader, XvdUpdateSegment},
     xvd::math::page_number_to_offset,
 };
+
+const DEFAULT_HTTP_READ_AHEAD_BYTES: usize = 4 * 1024 * 1024;
+
+fn seek_target(current: u64, len: u64, pos: SeekFrom) -> io::Result<u64> {
+    let new_offset = match pos {
+        SeekFrom::Start(n) => n,
+        SeekFrom::Current(delta) => if delta >= 0 {
+            current.checked_add(delta as u64)
+        } else {
+            current.checked_sub(delta.unsigned_abs())
+        }
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid relative seek"))?,
+        SeekFrom::End(delta) => if delta >= 0 {
+            len.checked_add(delta as u64)
+        } else {
+            len.checked_sub(delta.unsigned_abs())
+        }
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid end-relative seek"))?,
+    };
+
+    if new_offset > len {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "seek past virtual device end",
+        ));
+    }
+
+    Ok(new_offset)
+}
+
+fn reqwest_err(context: &str, err: reqwest::Error) -> io::Error {
+    Error::other(format!("{context}: {err}"))
+}
+
+fn parse_content_range_total(value: &str) -> Option<u64> {
+    let (_, total) = value.split_once('/')?;
+    if total == "*" {
+        return None;
+    }
+    total.parse().ok()
+}
+
+#[derive(Debug)]
+struct ReadAheadBuffer {
+    start: u64,
+    data: Vec<u8>,
+    capacity: usize,
+}
+
+impl ReadAheadBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            start: 0,
+            data: Vec::new(),
+            capacity,
+        }
+    }
+
+    fn end(&self) -> u64 {
+        self.start + self.data.len() as u64
+    }
+
+    fn contains(&self, offset: u64) -> bool {
+        offset >= self.start && offset < self.end()
+    }
+
+    fn read_into(&self, offset: u64, buf: &mut [u8]) -> usize {
+        if buf.is_empty() || !self.contains(offset) {
+            return 0;
+        }
+
+        let start = (offset - self.start) as usize;
+        let to_copy = (self.data.len() - start).min(buf.len());
+        buf[..to_copy].copy_from_slice(&self.data[start..start + to_copy]);
+        to_copy
+    }
+
+    fn append(&mut self, chunk_start: u64, chunk: &[u8]) {
+        if self.capacity == 0 || chunk.is_empty() {
+            return;
+        }
+
+        if self.data.is_empty() || self.end() != chunk_start {
+            let keep = chunk.len().min(self.capacity);
+            let skip = chunk.len() - keep;
+            self.start = chunk_start + skip as u64;
+            self.data.clear();
+            self.data.extend_from_slice(&chunk[skip..]);
+            return;
+        }
+
+        self.data.extend_from_slice(chunk);
+        if self.data.len() > self.capacity {
+            let overflow = self.data.len() - self.capacity;
+            self.data.drain(..overflow);
+            self.start += overflow as u64;
+        }
+    }
+}
+
+struct ActiveHttpRange {
+    next_offset: u64,
+    end_offset: u64,
+    response: blocking::Response,
+}
+
+pub struct HttpFile {
+    client: blocking::Client,
+    url: Url,
+    len: u64,
+    pos: u64,
+    read_ahead_bytes: usize,
+    cache: ReadAheadBuffer,
+    active: Option<ActiveHttpRange>,
+}
+
+impl HttpFile {
+    pub fn open(url: impl IntoUrl) -> io::Result<Self> {
+        Self::with_client_and_readahead(blocking::Client::new(), url, DEFAULT_HTTP_READ_AHEAD_BYTES)
+    }
+
+    pub fn with_client(client: blocking::Client, url: impl IntoUrl) -> io::Result<Self> {
+        Self::with_client_and_readahead(client, url, DEFAULT_HTTP_READ_AHEAD_BYTES)
+    }
+
+    pub fn with_readahead(url: impl IntoUrl, read_ahead_bytes: usize) -> io::Result<Self> {
+        Self::with_client_and_readahead(blocking::Client::new(), url, read_ahead_bytes)
+    }
+
+    pub fn with_client_and_readahead(
+        client: blocking::Client,
+        url: impl IntoUrl,
+        read_ahead_bytes: usize,
+    ) -> io::Result<Self> {
+        let url = url
+            .into_url()
+            .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?;
+        let len = Self::discover_len(&client, &url)?;
+        let read_ahead_bytes = read_ahead_bytes.max(1);
+
+        Ok(Self {
+            client,
+            url,
+            len,
+            pos: 0,
+            read_ahead_bytes,
+            cache: ReadAheadBuffer::new(read_ahead_bytes),
+            active: None,
+        })
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn discover_len(client: &blocking::Client, url: &Url) -> io::Result<u64> {
+        if let Ok(response) = client.head(url.clone()).send() {
+            let response = response
+                .error_for_status()
+                .map_err(|err| reqwest_err("HTTP HEAD failed", err))?;
+            if let Some(len) = response.content_length() {
+                if len > 0 {
+                    return Ok(len);
+                }
+            }
+        }
+
+        let response = client
+            .get(url.clone())
+            .header(RANGE, "bytes=0-0")
+            .send()
+            .map_err(|err| reqwest_err("HTTP range probe failed", err))?;
+        let status = response.status();
+        if status == StatusCode::RANGE_NOT_SATISFIABLE {
+            if let Some(total) = response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range_total)
+            {
+                return Ok(total);
+            }
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|err| reqwest_err("HTTP range probe failed", err))?;
+
+        if let Some(total) = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range_total)
+        {
+            return Ok(total);
+        }
+
+        if status == StatusCode::OK {
+            if let Some(len) = response.content_length() {
+                return Ok(len);
+            }
+        }
+
+        Err(Error::new(
+            ErrorKind::InvalidData,
+            "unable to determine HTTP object length",
+        ))
+    }
+
+    fn reopen_active_range(&mut self) -> io::Result<()> {
+        self.active = None;
+        if self.pos >= self.len {
+            return Ok(());
+        }
+
+        let range_end = self
+            .pos
+            .saturating_add(self.read_ahead_bytes as u64)
+            .saturating_sub(1)
+            .min(self.len - 1);
+        let response = self
+            .client
+            .get(self.url.clone())
+            .header(RANGE, format!("bytes={}-{}", self.pos, range_end))
+            .send()
+            .map_err(|err| reqwest_err("HTTP range request failed", err))?;
+        let status = response.status();
+        let response = response
+            .error_for_status()
+            .map_err(|err| reqwest_err("HTTP range request failed", err))?;
+
+        let end_offset = match status {
+            StatusCode::PARTIAL_CONTENT => {
+                self.pos
+                    + response
+                        .content_length()
+                        .unwrap_or(range_end - self.pos + 1)
+            }
+            StatusCode::OK if self.pos == 0 => self.len,
+            StatusCode::OK => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "server ignored byte range request",
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("unexpected HTTP status for range request: {status}"),
+                ));
+            }
+        };
+
+        self.active = Some(ActiveHttpRange {
+            next_offset: self.pos,
+            end_offset,
+            response,
+        });
+        Ok(())
+    }
+
+    fn read_from_cache(&mut self, buf: &mut [u8]) -> usize {
+        let read = self.cache.read_into(self.pos, buf);
+        self.pos += read as u64;
+        read
+    }
+
+    fn read_from_active(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(active) = self.active.as_mut() else {
+            return Ok(0);
+        };
+
+        let available = active.end_offset.saturating_sub(active.next_offset) as usize;
+        if available == 0 {
+            self.active = None;
+            return Ok(0);
+        }
+
+        let to_read = available.min(buf.len());
+        let read = active.response.read(&mut buf[..to_read])?;
+        if read == 0 {
+            self.active = None;
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "HTTP response ended before the requested range was fully read",
+            ));
+        }
+
+        let chunk_start = active.next_offset;
+        active.next_offset += read as u64;
+        if active.next_offset >= active.end_offset {
+            self.active = None;
+        }
+
+        self.cache.append(chunk_start, &buf[..read]);
+        self.pos += read as u64;
+        Ok(read)
+    }
+}
+
+impl Read for HttpFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() || self.pos >= self.len {
+            return Ok(0);
+        }
+
+        let mut filled = 0;
+        while filled < buf.len() && self.pos < self.len {
+            let cached = self.read_from_cache(&mut buf[filled..]);
+            if cached > 0 {
+                filled += cached;
+                continue;
+            }
+
+            let active_matches_position = self
+                .active
+                .as_ref()
+                .map(|active| active.next_offset == self.pos)
+                .unwrap_or(false);
+            if !active_matches_position {
+                self.reopen_active_range()?;
+                if self.active.is_none() {
+                    break;
+                }
+            }
+
+            let read = self.read_from_active(&mut buf[filled..])?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+
+        Ok(filled)
+    }
+}
+
+impl Seek for HttpFile {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let new_pos = seek_target(self.pos, self.len, pos)?;
+
+        if let Some(active) = &self.active {
+            let can_reuse_stream = new_pos == active.next_offset
+                || (new_pos < active.next_offset && self.cache.contains(new_pos));
+            if !can_reuse_stream {
+                self.active = None;
+            }
+        }
+
+        self.pos = new_pos;
+        Ok(self.pos)
+    }
+}
 
 #[derive(Debug)]
 struct XvdEncryptionInfo {
@@ -93,34 +458,8 @@ impl Read for XvdStream {
 
 impl Seek for XvdStream {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let new_relative = match pos {
-            SeekFrom::Start(n) => n,
-            SeekFrom::Current(delta) => {
-                let current = self.current_relative_pos()?;
-                if delta >= 0 {
-                    current.checked_add(delta as u64)
-                } else {
-                    current.checked_sub(delta.unsigned_abs())
-                }
-                .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid relative seek"))?
-            }
-            SeekFrom::End(delta) => {
-                let len = self.len();
-                if delta >= 0 {
-                    len.checked_add(delta as u64)
-                } else {
-                    len.checked_sub(delta.unsigned_abs())
-                }
-                .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid end-relative seek"))?
-            }
-        };
-
-        if new_relative > self.len() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "seek past virtual device end",
-            ));
-        }
+        let current = self.current_relative_pos()?;
+        let new_relative = seek_target(current, self.len(), pos)?;
 
         self.file
             .seek(SeekFrom::Start(self.offset + new_relative))?;
@@ -165,8 +504,12 @@ fn extract_ntfs_file<T: Read + Seek>(
         }
 
         match data_value {
-            ntfs::attribute_value::NtfsAttributeValue::Resident(ntfs_resident_attribute_value) => todo!(),
-            ntfs::attribute_value::NtfsAttributeValue::NonResident(ntfs_non_resident_attribute_value) => {
+            ntfs::attribute_value::NtfsAttributeValue::Resident(ntfs_resident_attribute_value) => {
+                todo!()
+            }
+            ntfs::attribute_value::NtfsAttributeValue::NonResident(
+                ntfs_non_resident_attribute_value,
+            ) => {
                 for r in ntfs_non_resident_attribute_value.data_runs() {
                     if let Err(e) = r {
                         return Err(Box::new(e));
@@ -176,8 +519,10 @@ fn extract_ntfs_file<T: Read + Seek>(
                     let len = d.allocated_size();
                     println!("data location {dp} + {len}");
                 }
-            },
-            ntfs::attribute_value::NtfsAttributeValue::AttributeListNonResident(ntfs_attribute_list_non_resident_attribute_value) => todo!(),
+            }
+            ntfs::attribute_value::NtfsAttributeValue::AttributeListNonResident(
+                ntfs_attribute_list_non_resident_attribute_value,
+            ) => todo!(),
         }
     }
 
@@ -266,16 +611,22 @@ struct SegmentMetadataInfo {
     segment: XvdSegmentMetadataSegment,
 }
 
-pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Error>> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path.clone())
-        .await
-        .expect("Unable to open file");
+trait ReadExactAt: Read + Seek {
+    fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.seek(SeekFrom::Start(offset))?;
+        self.read_exact(buf)
+    }
+}
+
+impl<T: Read + Seek> ReadExactAt for T {}
+
+pub fn parse_file<T: ReadExactAt>(
+    mut file: T,
+) -> Result<XvdFile, Box<dyn std::error::Error>> {
     let mut header_buffer = [0u8; 4096];
     let mut info_buffer = [0u8; 0xDA8];
 
-    file.read_exact(&mut header_buffer).await.unwrap();
+    file.read_exact(&mut header_buffer).unwrap();
 
     let xvd_header: XvdHeader = transmute!(header_buffer);
 
@@ -310,9 +661,8 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
     // TODO: Check if we have proper content type
     if xvc_data_length > 0 {
         file.seek(std::io::SeekFrom::Start(xvc_info_offset))
-            .await
             .expect("Unable to seek");
-        file.read_exact(&mut info_buffer).await.unwrap();
+        file.read_exact(&mut info_buffer).unwrap();
         let xvc_info: XvcInfo = transmute!(info_buffer);
         // info = Some(xvc_info);
 
@@ -323,14 +673,14 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
         if xvc_info.version >= 1 {
             let mut region_header_buf = [0u8; 0x80];
             for _ in 0..region_count {
-                file.read_exact(&mut region_header_buf).await.unwrap();
+                file.read_exact(&mut region_header_buf).unwrap();
                 let region_header: XvcRegionHeader = transmute!(region_header_buf);
                 region_headers.push(region_header);
             }
 
             let mut update_segment_buf = [0u8; 0xC];
             for _ in 0..update_segment_count {
-                file.read_exact(&mut update_segment_buf).await.unwrap();
+                file.read_exact(&mut update_segment_buf).unwrap();
                 let update_segment: XvdUpdateSegment = transmute!(update_segment_buf);
                 update_segments.push(update_segment);
             }
@@ -338,18 +688,17 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
             if xvc_info.version >= 2 {
                 let mut region_specifier_buf = [0u8; 0x188];
                 for _ in 0..region_specifier_count {
-                    file.read_exact(&mut region_specifier_buf).await.unwrap();
+                    file.read_exact(&mut region_specifier_buf).unwrap();
                     let region_specifier: XvcRegionSpecifier = transmute!(region_specifier_buf);
                     region_specifiers.push(region_specifier);
                 }
 
                 if xvd_header.mutable_page_count > 0 {
                     file.seek(std::io::SeekFrom::Start(mdu_offset))
-                        .await
                         .expect("Unable to seek");
                     let mut byte = [0; 1];
                     for _ in 0..region_count {
-                        file.read_exact(&mut byte).await.unwrap();
+                        file.read_exact(&mut byte).unwrap();
                         region_presence_info.push(byte[0]);
                     }
                 }
@@ -376,7 +725,7 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
         panic!("Unsupported XvdType, TODO support Dynamic")
     };
 
-    let sfile = std::fs::File::open(path).unwrap();
+    let mut sfile = file;
 
     let mut enc_sections: Vec<EncryptedSectionInfo> = vec![];
     for h in &region_headers {
@@ -398,7 +747,7 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
 
         let mut data_units: Vec<u32> = vec![];
         let mut data_hashs: Vec<[u8; 20]> = vec![];
-        let mut data_hash_infos : Vec<DataHashInfo> = vec![];
+        let mut data_hash_infos: Vec<DataHashInfo> = vec![];
         let start_page = offset_to_page_number(h.offset - user_data_offset);
         let num_pages = bytes_to_pages(length);
         for page in 0..num_pages {
@@ -414,25 +763,33 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
             );
             let hash_entry_offset =
                 hash_tree_offset + page_number_to_offset(hash_block) + (entry_num * 0x18);
-            let read_offset= hash_entry_offset + 0x14;
-            sfile.read_exact_at(&mut buf, read_offset).unwrap();
+
+            let mut block_hash = [0u8; 0x14];
+            sfile.seek(SeekFrom::Start(hash_entry_offset));
+            sfile.read_exact(&mut block_hash).unwrap();
+            data_hashs.push(block_hash);
+
+            // let read_offset = hash_entry_offset + 0x14;
+            // sfile.seek(SeekFrom::Start(read_offset));
+            sfile.read_exact(&mut buf).unwrap();
             let u = u32::from_le_bytes(buf);
             data_units.push(u);
 
-            let mut block_hash = [0u8; 0x14];
-            sfile.read_exact_at(&mut block_hash, hash_entry_offset).unwrap();
-            data_hashs.push(block_hash);
-
             let data_to_hash_offset = page_number_to_offset(start_page + page) + user_data_offset;
 
-            data_hash_infos.push(DataHashInfo { data_hash: block_hash, data_unit: u, data_to_hash_offset: data_to_hash_offset });
+            data_hash_infos.push(DataHashInfo {
+                data_hash: block_hash,
+                data_unit: u,
+                data_to_hash_offset: data_to_hash_offset,
+            });
 
             if true {
                 continue;
             }
 
             let mut block = [0u8; 4096];
-            sfile.read_exact_at(&mut block, data_to_hash_offset).unwrap();
+            sfile.seek(SeekFrom::Start(data_to_hash_offset));
+            sfile.read_exact(&mut block).unwrap();
 
             let mut sha = sha2::Sha256::new();
             sha.update(block);
@@ -457,52 +814,110 @@ pub async fn parse_file(path: String) -> Result<XvdFile, Box<dyn std::error::Err
         });
     }
 
-    let mut user_data_header_buf = [0u8; 128/8];
-    sfile.read_exact_at(&mut user_data_header_buf, user_data_offset).unwrap();
-    let user_data_header : XvdUserDataHeader = transmute!(user_data_header_buf);
+    let mut user_data_header_buf = [0u8; 128 / 8];
+    sfile
+        .read_exact_at(&mut user_data_header_buf, user_data_offset)
+        .unwrap();
+    let user_data_header: XvdUserDataHeader = transmute!(user_data_header_buf);
     if user_data_header.t == 0 {
         let mut off = user_data_offset + user_data_header.length as u64;
-        let mut user_data_package_files_header_buf = [0u8; 4224/8];
-        sfile.read_exact_at(&mut user_data_package_files_header_buf, off).unwrap();
-        let user_data_package_files_header : XvdUserDataPackageFilesHeader = transmute!(user_data_package_files_header_buf);
+        let mut user_data_package_files_header_buf = [0u8; 4224 / 8];
+        sfile
+            .read_exact_at(&mut user_data_package_files_header_buf, off)
+            .unwrap();
+        let user_data_package_files_header: XvdUserDataPackageFilesHeader =
+            transmute!(user_data_package_files_header_buf);
         let c = user_data_package_files_header.file_count;
         let fullname = user_data_package_files_header.package_full_name;
-        println!("package {} / file count {}", String::from_utf16(&fullname).unwrap(), c);
+        println!(
+            "package {} / file count {}",
+            String::from_utf16(&fullname).unwrap(),
+            c
+        );
         off += user_data_package_files_header_buf.len() as u64;
         for _ in 0..user_data_package_files_header.file_count {
-            let mut user_data_package_files_header_buf = [0u8; 4224/8];
-            sfile.read_exact_at(&mut user_data_package_files_header_buf, off).unwrap();
-            let user_data_package_file_entry : XvdUserDataPackageFileEntry = transmute!(user_data_package_files_header_buf);
+            let mut user_data_package_files_header_buf = [0u8; 4224 / 8];
+            sfile
+                .read_exact_at(&mut user_data_package_files_header_buf, off)
+                .unwrap();
+            let user_data_package_file_entry: XvdUserDataPackageFileEntry =
+                transmute!(user_data_package_files_header_buf);
             off += user_data_package_files_header_buf.len() as u64;
-            let o  = user_data_package_file_entry.offset;
-            let s: u32  = user_data_package_file_entry.size;
+            let o = user_data_package_file_entry.offset;
+            let s: u32 = user_data_package_file_entry.size;
             let fullname = user_data_package_file_entry.file_path;
-            let end = fullname.iter().position(|&c| c == 0).unwrap_or(fullname.len());
+            let end = fullname
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(fullname.len());
             let pfull_name: String = String::from_utf16(&fullname[..end]).unwrap();
             println!("file {} / file offset {} size {}", pfull_name, o, s);
 
-            if pfull_name == "SegmentMetadata.bin" {                
-                let mut buf = [0u8; 800/8];
-                sfile.read_exact_at(&mut buf, user_data_offset + user_data_header_buf.len() as u64 + o as u64).unwrap();
-                let segment_header : XvdSegmentMetadataHeader = transmute!(buf);
-                let paths_offset = segment_header.header_length as u64 + segment_header.segment_count as u64 * 0x10;
+            if pfull_name == "SegmentMetadata.bin" {
+                let mut buf = [0u8; 800 / 8];
+                sfile
+                    .read_exact_at(
+                        &mut buf,
+                        user_data_offset + user_data_header_buf.len() as u64 + o as u64,
+                    )
+                    .unwrap();
+                let segment_header: XvdSegmentMetadataHeader = transmute!(buf);
+                let paths_offset = segment_header.header_length as u64
+                    + segment_header.segment_count as u64 * 0x10;
                 for section in &mut enc_sections {
                     let mut page_offset = section.section_offset.div_ceil(PAGE_SIZE as u64);
                     for segment_no in section.first_segment_index..segment_header.segment_count {
-                        let mut buf = [0u8; 128/8];
-                        sfile.read_exact_at(&mut buf, (user_data_offset + user_data_header_buf.len() as u64 + o as u64 + segment_header.header_length as u64) as u64 + segment_no as u64 * 0x10).unwrap();
-                        let segment : XvdSegmentMetadataSegment = transmute!(buf);
+                        let mut buf = [0u8; 128 / 8];
+                        sfile
+                            .read_exact_at(
+                                &mut buf,
+                                (user_data_offset
+                                    + user_data_header_buf.len() as u64
+                                    + o as u64
+                                    + segment_header.header_length as u64)
+                                    as u64
+                                    + segment_no as u64 * 0x10,
+                            )
+                            .unwrap();
+                        let segment: XvdSegmentMetadataSegment = transmute!(buf);
                         let s = segment.path_length;
                         let mut buf = vec![0u16, 0];
                         buf.resize(s as usize, 0);
-                        sfile.read_exact_at(buf.as_mut_bytes(), (user_data_offset + o as u64 + user_data_header_buf.len() as u64 + paths_offset + segment.path_offset as u64) as u64).unwrap();
+                        sfile
+                            .read_exact_at(
+                                buf.as_mut_bytes(),
+                                (user_data_offset
+                                    + o as u64
+                                    + user_data_header_buf.len() as u64
+                                    + paths_offset
+                                    + segment.path_offset as u64)
+                                    as u64,
+                            )
+                            .unwrap();
                         let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
-                        println!("{segment_no}/{page_offset} {} {}", if segment.flags == 1 { "E" } else { " " }, file_name);
-                        let page_length = if segment.filesize == 0 { 1 } else { segment.filesize.div_ceil(PAGE_SIZE as u64) };
-                        if !(page_offset * (PAGE_SIZE as u64) < section.section_offset + section.section_length) {
+                        println!(
+                            "{segment_no}/{page_offset} {} {}",
+                            if segment.flags == 1 { "E" } else { " " },
+                            file_name
+                        );
+                        let page_length = if segment.filesize == 0 {
+                            1
+                        } else {
+                            segment.filesize.div_ceil(PAGE_SIZE as u64)
+                        };
+                        if !(page_offset * (PAGE_SIZE as u64)
+                            < section.section_offset + section.section_length)
+                        {
                             break;
                         }
-                        section.files.push(FileSegment { file_name, data_offset: page_offset * PAGE_SIZE as u64, data_length: segment.filesize, page_offset, page_length, keep_encrypted: segment.flags == 1 });
+                        section.files.push(FileSegment {
+                            file_name,
+                            data_offset: page_offset * PAGE_SIZE as u64,
+                            data_length: segment.filesize,
+                            page_offset,
+                            page_length,
+                            keep_encrypted: segment.flags == 1,
+                        });
                         page_offset += page_length;
                     }
                 }
@@ -539,7 +954,6 @@ pub fn unpack_file(
     destination: String,
     full_key: [u8; 32],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sfile = std::fs::File::open(path)?;
     let block_size = 4096; //xvd.header.block_size;
 
     let extract_root = PathBuf::from(destination);
@@ -551,7 +965,7 @@ pub fn unpack_file(
 
     // let enc_s = xvd.encrypted_section_infos.to_vec();
 
-    let mut plan: Vec<UnpackPlan> = vec![]; 
+    let mut plan: Vec<UnpackPlan> = vec![];
     for section in &xvd.encrypted_section_infos {
         // let mut xvdStream = XvdStream {
         //     file: sfile.try_clone().unwrap(),
@@ -566,22 +980,37 @@ pub fn unpack_file(
             let page_offset = fs.page_offset;
             let page_length = fs.page_length;
             let page_in_section = page_offset - section.section_offset.div_ceil(PAGE_SIZE as u64);
-            
+
             let path = fs.file_name.replace("\\", "/");
             let final_path = extract_root.join(path);
             let metadata = std::fs::metadata(&final_path);
             if let Err(_) = metadata {
-                plan.push(UnpackPlan { reason: FetchReason::Missing, section, file: fs, final_path });
+                plan.push(UnpackPlan {
+                    reason: FetchReason::Missing,
+                    section,
+                    file: fs,
+                    final_path,
+                });
                 continue;
             }
             let metadata = metadata.unwrap();
             if metadata.len() != fs.data_length {
-                plan.push(UnpackPlan { reason: FetchReason::LengthMismatch, section, file: fs, final_path });
+                plan.push(UnpackPlan {
+                    reason: FetchReason::LengthMismatch,
+                    section,
+                    file: fs,
+                    final_path,
+                });
                 continue;
             }
             let file: Result<std::fs::File, Error> = std::fs::File::open(&final_path);
             if let Err(_) = file {
-                plan.push(UnpackPlan { reason: FetchReason::Missing, section, file: fs, final_path });
+                plan.push(UnpackPlan {
+                    reason: FetchReason::Missing,
+                    section,
+                    file: fs,
+                    final_path,
+                });
                 continue;
             }
             let mut file = file.unwrap();
@@ -589,8 +1018,7 @@ pub fn unpack_file(
             for p in 0..page_length {
                 let mut buf = [0u8; PAGE_SIZE as usize];
                 let data_unit = match &section.data_units {
-                    Some(units) => *units
-                        .get(page_in_section as usize + p as usize).unwrap(),
+                    Some(units) => *units.get(page_in_section as usize + p as usize).unwrap(),
                     None => page_in_section as u32 + p as u32,
                 };
                 let len_read: usize;
@@ -605,7 +1033,12 @@ pub fn unpack_file(
                     len_read = buf.len();
                     file.read_exact(&mut buf)
                 } {
-                    plan.push(UnpackPlan { reason: FetchReason::ReadErr, section, file: fs, final_path});
+                    plan.push(UnpackPlan {
+                        reason: FetchReason::ReadErr,
+                        section,
+                        file: fs,
+                        final_path,
+                    });
                     break;
                 }
 
@@ -613,7 +1046,16 @@ pub fn unpack_file(
                 // xvdStream.seek(SeekFrom::Start(page_in_section * PAGE_SIZE as u64)).unwrap();
                 // xvdStream.read_exact(&mut expected_buf).unwrap();
 
-                let encrypted = transform_page_xts(&buf, data_unit, section.header_id, section.vduid, data_key, tweak_key, true).unwrap();
+                let encrypted = transform_page_xts(
+                    &buf,
+                    data_unit,
+                    section.header_id,
+                    section.vduid,
+                    data_key,
+                    tweak_key,
+                    true,
+                )
+                .unwrap();
 
                 let mut sha = sha2::Sha256::new();
                 sha.update(encrypted);
@@ -632,7 +1074,7 @@ pub fn unpack_file(
                 // } else {
                 //     println!("data mismatch")
                 // }
-                // 
+                //
                 // let mut sha = sha2::Sha256::new();
                 // sha.update(block);
                 // let calculated_expected = sha.finalize();
@@ -640,30 +1082,57 @@ pub fn unpack_file(
                 if calculated[..0x14] != section.data_hashs[page_in_section as usize + p as usize] {
                     println!("BEGIN {} page checksum {} not ok", final_path.display(), p);
                     println!("size {} lenRead {len_read}", fs.data_length);
-                    let mut block: [u8; 4096] = [0u8; 4096];
-                    sfile.read_exact_at(&mut block, info.data_to_hash_offset).unwrap();
+                    // let mut block: [u8; 4096] = [0u8; 4096];
+                    // sfile
+                    //     .read_exact_at(&mut block, info.data_to_hash_offset)
+                    //     .unwrap();
 
-                    let decrypted = transform_page_xts(&block, data_unit, section.header_id, section.vduid, data_key, tweak_key, false).unwrap();
-                    let reencrypted = transform_page_xts(&decrypted, data_unit, section.header_id, section.vduid, data_key, tweak_key, true).unwrap();
+                    // let decrypted = transform_page_xts(
+                    //     &block,
+                    //     data_unit,
+                    //     section.header_id,
+                    //     section.vduid,
+                    //     data_key,
+                    //     tweak_key,
+                    //     false,
+                    // )
+                    // .unwrap();
+                    // let reencrypted = transform_page_xts(
+                    //     &decrypted,
+                    //     data_unit,
+                    //     section.header_id,
+                    //     section.vduid,
+                    //     data_key,
+                    //     tweak_key,
+                    //     true,
+                    // )
+                    // .unwrap();
 
-                    if block == reencrypted {
-                        println!("data match")
-                    } else {
-                        println!("data mismatch")
-                    }
-                    let mut sha = sha2::Sha256::new();
-                    sha.update(block);
-                    let calculated_expected = sha.finalize();
-                    if calculated_expected[..0x14] == section.data_hashs[page_in_section as usize + p as usize] {
-                        println!("page expected checksum {} ok", p)
-                    } else {
-                        println!("page expected checksum {} not ok", p)
-                    }
-                    for (i, (&dec, &raw)) in decrypted.iter().zip(buf.iter()).enumerate() {
-                        println!("{i:08x}: {dec:02x}  {raw:02x}");
-                    }
+                    // if block == reencrypted {
+                    //     println!("data match")
+                    // } else {
+                    //     println!("data mismatch")
+                    // }
+                    // let mut sha = sha2::Sha256::new();
+                    // sha.update(block);
+                    // let calculated_expected = sha.finalize();
+                    // if calculated_expected[..0x14]
+                    //     == section.data_hashs[page_in_section as usize + p as usize]
+                    // {
+                    //     println!("page expected checksum {} ok", p)
+                    // } else {
+                    //     println!("page expected checksum {} not ok", p)
+                    // }
+                    // for (i, (&dec, &raw)) in decrypted.iter().zip(buf.iter()).enumerate() {
+                    //     println!("{i:08x}: {dec:02x}  {raw:02x}");
+                    // }
                     println!("END {} page checksum {} not ok", final_path.display(), p);
-                    plan.push(UnpackPlan { reason: FetchReason::ShaMismatch, section, file: fs, final_path});
+                    plan.push(UnpackPlan {
+                        reason: FetchReason::ShaMismatch,
+                        section,
+                        file: fs,
+                        final_path,
+                    });
                     break;
                 }
 
@@ -672,7 +1141,6 @@ pub fn unpack_file(
                 // } else {
                 //     println!("page expected checksum {} not ok", p)
                 // }
-
             }
         }
     }
@@ -680,6 +1148,7 @@ pub fn unpack_file(
         println!("{} {:?}", e.final_path.display(), e.reason);
     }
     return Ok(());
+    let sfile = std::fs::File::open(path)?;
     let gp = gpt::GptConfig::new()
         .writable(false)
         .logical_block_size(if block_size == 512 {
@@ -737,4 +1206,41 @@ pub fn unpack_file(
     println!("extracting data directory to {}", extract_root.display());
     extract_ntfs_directory(&ntfs, &mut fs, &root, &extract_root)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReadAheadBuffer, parse_content_range_total, seek_target};
+    use std::io::{ErrorKind, SeekFrom};
+
+    #[test]
+    fn content_range_total_is_parsed() {
+        assert_eq!(parse_content_range_total("bytes 0-0/1234"), Some(1234));
+        assert_eq!(parse_content_range_total("bytes 0-0/*"), None);
+        assert_eq!(parse_content_range_total("invalid"), None);
+    }
+
+    #[test]
+    fn read_ahead_buffer_retains_tail() {
+        let mut cache = ReadAheadBuffer::new(4);
+        cache.append(0, b"ab");
+        cache.append(2, b"cd");
+        cache.append(4, b"ef");
+
+        let mut out = [0u8; 4];
+        let read = cache.read_into(2, &mut out);
+        assert_eq!(read, 4);
+        assert_eq!(&out, b"cdef");
+    }
+
+    #[test]
+    fn seek_target_rejects_out_of_bounds() {
+        assert_eq!(seek_target(5, 10, SeekFrom::Current(-3)).unwrap(), 2);
+        assert_eq!(seek_target(5, 10, SeekFrom::End(-2)).unwrap(), 8);
+        assert_eq!(seek_target(5, 10, SeekFrom::Start(10)).unwrap(), 10);
+        assert_eq!(
+            seek_target(5, 10, SeekFrom::Start(11)).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+    }
 }

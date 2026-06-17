@@ -1,16 +1,19 @@
 use xodus::{
     licensing::splicense::unpack_key,
-    xvd::utils::{parse_file, unpack_file},
+    xvd::utils::{HttpFile, XvdFile, parse_file, unpack_file},
 };
 
 use crate::license::get_license;
-pub async fn run(
-    client: &reqwest::Client,
-    path: String,
-    destination: String,
-    market: String,
-) {
-    let xvd = parse_file(path.to_string()).await.expect("Failed to parse");
+pub async fn run(client: &reqwest::Client, path: String, destination: String, market: String) {
+    let mp: String = path.clone();
+    let xvd: xodus::xvd::utils::XvdFile = tokio::task::spawn_blocking(|| -> XvdFile {
+        let file = HttpFile::open(mp).unwrap();
+        let xvd = parse_file(file).expect("Failed to parse");
+
+        xvd
+    })
+    .await.unwrap();
+
     let license = get_license(client, xvd.content_id.clone(), market).await;
     if let Err(err) = license {
         eprintln!("{}", err);

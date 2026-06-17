@@ -166,7 +166,7 @@ pub fn transform_page_xts(
         } else {
             data_cipher.decrypt_block(&mut block);
         }
-        
+
         out[off..off + 16].copy_from_slice(&block);
 
         encrypted_tweak = gf_mul_x(encrypted_tweak);

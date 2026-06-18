@@ -5,13 +5,15 @@ use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 
 use std::io::{Read, Seek, SeekFrom};
 
+use crate::xvd::utils::ReadExactAt;
+
 const PAGE_SIZE: usize = 0x1000;
 
 pub trait PageSource: Read + Seek {}
 impl<T: Read + Seek> PageSource for T {}
 
-pub struct SectionReader<R> {
-    inner: R,
+pub struct SectionReader<'t> {
+    inner: &'t mut dyn ReadExactAt,
     section_offset: u64,
     section_length: u64,
 
@@ -30,9 +32,9 @@ pub struct SectionReader<R> {
     cached_page_plaintext: [u8; PAGE_SIZE],
 }
 
-impl<R: PageSource> SectionReader<R> {
+impl<'t> SectionReader<'t> {
     pub fn new(
-        inner: R,
+        inner: &'t mut dyn ReadExactAt,
         section_offset: u64,
         section_length: u64,
         header_id: u32,

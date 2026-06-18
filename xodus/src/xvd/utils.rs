@@ -1,13 +1,12 @@
 use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use reqwest::{
     IntoUrl, StatusCode, Url, blocking,
     header::{CONTENT_RANGE, RANGE},
 };
 
-use gpt::DiskDevice;
 use ntfs::{Ntfs, NtfsFile, NtfsReadSeek};
 use rsa::sha2::{self, Digest};
 use tokio::{
@@ -69,6 +68,10 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
         return None;
     }
     total.parse().ok()
+}
+
+fn http_trace_enabled() -> bool {
+    std::env::var_os("XODUS_HTTP_TRACE").is_some()
 }
 
 #[derive(Debug)]
@@ -188,6 +191,12 @@ impl HttpFile {
         self.len == 0
     }
 
+    fn trace(&self, message: impl AsRef<str>) {
+        if http_trace_enabled() {
+            eprintln!("[httpfile] {}", message.as_ref());
+        }
+    }
+
     fn discover_len(client: &blocking::Client, url: &Url) -> io::Result<u64> {
         if let Ok(response) = client.head(url.clone()).send() {
             let response = response
@@ -242,6 +251,9 @@ impl HttpFile {
     }
 
     fn reopen_active_range(&mut self) -> io::Result<()> {
+        if self.active.is_some() {
+            self.trace(format!("dropping active range before reopen at pos={}", self.pos));
+        }
         self.active = None;
         if self.pos >= self.len {
             return Ok(());
@@ -290,6 +302,10 @@ impl HttpFile {
             end_offset,
             response,
         });
+        self.trace(format!(
+            "opened range status={} start={} end={} len={}",
+            status, self.pos, end_offset, end_offset - self.pos
+        ));
         Ok(())
     }
 
@@ -298,15 +314,34 @@ impl HttpFile {
             return Ok(true);
         }
 
-        let Some(active) = self.active.as_mut() else {
+        let Some((available, next_offset, end_offset)) = self
+            .active
+            .as_ref()
+            .map(|active| {
+                (
+                    active.end_offset.saturating_sub(active.next_offset) as usize,
+                    active.next_offset,
+                    active.end_offset,
+                )
+            })
+        else {
             return Ok(false);
         };
 
-        let available = active.end_offset.saturating_sub(active.next_offset) as usize;
         if skip > available {
+            self.trace(format!(
+                "cannot skip in active stream: skip={} available={} pos={}",
+                skip, available, self.pos
+            ));
             return Ok(false);
         }
 
+        self.trace(format!(
+            "skipping forward in active stream: skip={} pos={} available={} active_next={} active_end={}",
+            skip, self.pos, available, next_offset, end_offset
+        ));
+
+        let active = self.active.as_mut().expect("active stream disappeared");
         let mut remaining = skip;
         let mut scratch = [0u8; 8192];
 
@@ -384,6 +419,11 @@ impl Read for HttpFile {
         while filled < buf.len() && self.pos < self.len {
             let cached = self.read_from_cache(&mut buf[filled..]);
             if cached > 0 {
+                self.trace(format!(
+                    "cache hit pos={} bytes={}",
+                    self.pos - cached as u64,
+                    cached
+                ));
                 filled += cached;
                 continue;
             }
@@ -394,6 +434,14 @@ impl Read for HttpFile {
                 .map(|active| active.next_offset == self.pos)
                 .unwrap_or(false);
             if !active_matches_position {
+                self.trace(format!(
+                    "active stream mismatch at pos={} active_next={}",
+                    self.pos,
+                    self.active
+                        .as_ref()
+                        .map(|active| active.next_offset.to_string())
+                        .unwrap_or_else(|| "none".to_string())
+                ));
                 self.reopen_active_range()?;
                 if self.active.is_none() {
                     break;
@@ -416,11 +464,16 @@ impl Seek for HttpFile {
         let new_pos = seek_target(self.pos, self.len, pos)?;
 
         if new_pos == self.pos {
+            self.trace(format!("seek no-op at pos={}", self.pos));
             return Ok(self.pos);
         }
 
         if new_pos > self.pos {
             if self.cache.contains(new_pos) {
+                self.trace(format!(
+                    "seek satisfied from cache old_pos={} new_pos={}",
+                    self.pos, new_pos
+                ));
                 self.pos = new_pos;
                 return Ok(self.pos);
             }
@@ -429,12 +482,29 @@ impl Seek for HttpFile {
             if skip <= SMALL_FORWARD_SEEK_LIMIT && self.skip_with_active_stream(skip)? {
                 return Ok(self.pos);
             }
+
+            self.trace(format!(
+                "forward seek requires reopen old_pos={} new_pos={} skip={} cache_window={}..{}",
+                self.pos,
+                new_pos,
+                skip,
+                self.cache.start,
+                self.cache.end()
+            ));
         }
 
         if let Some(active) = &self.active {
             let can_reuse_stream = new_pos == active.next_offset
                 || (new_pos < active.next_offset && self.cache.contains(new_pos));
             if !can_reuse_stream {
+                self.trace(format!(
+                    "dropping active stream on seek old_pos={} new_pos={} active_next={} cache_window={}..{}",
+                    self.pos,
+                    new_pos,
+                    active.next_offset,
+                    self.cache.start,
+                    self.cache.end()
+                ));
                 self.active = None;
             }
         }
@@ -807,8 +877,14 @@ pub fn parse_file<T: ReadExactAt>(mut file: T) -> Result<XvdFile, Box<dyn std::e
         let mut data_hash_infos: Vec<DataHashInfo> = vec![];
         let start_page = offset_to_page_number(h.offset - user_data_offset);
         let num_pages = bytes_to_pages(length);
-        for page in 0..num_pages {
-            let mut buf = [0u8; 4];
+        let section_started = Instant::now();
+        let r = h.region_id;
+        println!(
+            "reading {} hash pages for region {} starting at page {}",
+            num_pages, r, start_page
+        );
+        let mut page = 0;
+        while page < num_pages {
             let (hash_block, entry_num) = calculate_hash_block_num_for_block_num(
                 xvd_header.xvd_type,
                 _hash_tree_levels,
@@ -818,32 +894,74 @@ pub fn parse_file<T: ReadExactAt>(mut file: T) -> Result<XvdFile, Box<dyn std::e
                 false,
                 false,
             );
+            let mut run_len = 1u64;
+            while page + run_len < num_pages {
+                let (next_hash_block, next_entry_num) = calculate_hash_block_num_for_block_num(
+                    xvd_header.xvd_type,
+                    _hash_tree_levels,
+                    xvd_header.number_of_hashed_pages(),
+                    start_page + page + run_len,
+                    0,
+                    false,
+                    false,
+                );
+                if next_hash_block != hash_block || next_entry_num != entry_num + run_len {
+                    break;
+                }
+                run_len += 1;
+            }
+
             let hash_entry_offset =
                 hash_tree_offset + page_number_to_offset(hash_block) + (entry_num * 0x18);
+            let mut hash_entries = vec![0u8; run_len as usize * 0x18];
+            sfile
+                .read_exact_at(&mut hash_entries, hash_entry_offset)
+                .unwrap();
 
-            let mut block_hash = [0u8; 0x14];
-            sfile.seek(SeekFrom::Start(hash_entry_offset));
-            sfile.read_exact(&mut block_hash).unwrap();
-            data_hashs.push(block_hash);
+            for (index, entry) in hash_entries.chunks_exact(0x18).enumerate() {
+                let page_no = page + index as u64;
+                let mut block_hash = [0u8; 0x14];
+                block_hash.copy_from_slice(&entry[..0x14]);
+                data_hashs.push(block_hash);
 
-            // let read_offset = hash_entry_offset + 0x14;
-            // sfile.seek(SeekFrom::Start(read_offset));
-            sfile.read_exact(&mut buf).unwrap();
-            let u = u32::from_le_bytes(buf);
-            data_units.push(u);
+                let mut buf = [0u8; 4];
+                buf.copy_from_slice(&entry[0x14..0x18]);
+                let u = u32::from_le_bytes(buf);
+                data_units.push(u);
 
-            let data_to_hash_offset = page_number_to_offset(start_page + page) + user_data_offset;
+                let data_to_hash_offset =
+                    page_number_to_offset(start_page + page_no) + user_data_offset;
 
-            data_hash_infos.push(DataHashInfo {
-                data_hash: block_hash,
-                data_unit: u,
-                data_to_hash_offset: data_to_hash_offset,
-            });
+                data_hash_infos.push(DataHashInfo {
+                    data_hash: block_hash,
+                    data_unit: u,
+                    data_to_hash_offset,
+                });
+            }
+
+            let last_page = page + run_len;
+            if http_trace_enabled() && (page == 0 || last_page % 4096 == 0 || last_page == num_pages)
+            {
+                let r = h.region_id;
+                eprintln!(
+                    "[xvd] region {} page {}/{} hash_entry_offset={} run_len={} elapsed_ms={}",
+                    r,
+                    last_page,
+                    num_pages,
+                    hash_entry_offset,
+                    run_len,
+                    section_started.elapsed().as_millis()
+                );
+            }
 
             if true {
+                page += run_len;
                 continue;
             }
 
+            let mut buf = [0u8; 4];
+            let mut block_hash = [0u8; 0x14];
+            let data_to_hash_offset = page_number_to_offset(start_page + page) + user_data_offset;
             let mut block = [0u8; 4096];
             sfile.seek(SeekFrom::Start(data_to_hash_offset));
             sfile.read_exact(&mut block).unwrap();
@@ -856,7 +974,14 @@ pub fn parse_file<T: ReadExactAt>(mut file: T) -> Result<XvdFile, Box<dyn std::e
             } else {
                 println!("page checksum {} not ok", start_page + page)
             }
+            page += run_len;
         }
+        let rid = h.region_id;
+        println!(
+            "finished region {} hash pages in {} ms",
+            rid,
+            section_started.elapsed().as_millis()
+        );
 
         enc_sections.push(EncryptedSectionInfo {
             section_offset: h.offset,
@@ -998,6 +1123,17 @@ enum FetchReason {
     LengthMismatch,
     ShaMismatch,
     ReadErr,
+}
+
+impl FetchReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            FetchReason::Missing => "Missing",
+            FetchReason::LengthMismatch => "LengthMismatch",
+            FetchReason::ShaMismatch => "ShaMismatch",
+            FetchReason::ReadErr => "ReadErr",
+        }
+    }
 }
 
 struct UnpackPlan<'T> {
@@ -1202,6 +1338,45 @@ pub fn unpack_file(
                 // }
             }
         }
+    }
+    let total_download_bytes: u64 = plan.iter().map(|entry| entry.file.data_length).sum();
+    println!(
+        "{} files need download ({} bytes)",
+        plan.len(),
+        total_download_bytes
+    );
+    let reasons = [
+        FetchReason::Missing,
+        FetchReason::LengthMismatch,
+        FetchReason::ShaMismatch,
+        FetchReason::ReadErr,
+    ];
+    for reason in &reasons {
+        let matching: Vec<&UnpackPlan> = plan
+            .iter()
+            .filter(|entry| entry.reason.as_str() == reason.as_str())
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        let bytes: u64 = matching.iter().map(|entry| entry.file.data_length).sum();
+        println!(
+            "{}: {} files ({} bytes)",
+            reason.as_str(),
+            matching.len(),
+            bytes
+        );
+    }
+    let mut largest: Vec<&UnpackPlan> = plan.iter().collect();
+    largest.sort_by_key(|entry| std::cmp::Reverse(entry.file.data_length));
+    println!("Largest planned downloads:");
+    for entry in largest.into_iter().take(20) {
+        println!(
+            "{} {} bytes {}",
+            entry.reason.as_str(),
+            entry.file.data_length,
+            entry.final_path.display()
+        );
     }
     for e in &plan {
         println!("{} {:?}", e.final_path.display(), e.reason);

@@ -3,6 +3,7 @@ use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use ntfs::{Ntfs, NtfsFile, NtfsReadSeek};
+use tokio::io::AsyncWriteExt;
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncSeekExt},
@@ -160,33 +161,59 @@ impl Write for XvdStream {
     }
 }
 
-fn extract_ntfs_file<T: Read + Seek>(
+fn make_write<'a>(
+    output_file: &'a mut tokio::fs::File,
+    buf: &'a [u8],
+) -> impl Future<Output = std::io::Result<()>> + 'a {
+    output_file.write_all(buf)
+}
+
+async fn extract_ntfs_file<T: Read + Seek>(
     fs: &mut T,
     file: &NtfsFile<'_>,
     output_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut output_file = std::fs::File::create(output_path)?;
+    let mut output_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(output_path)
+        .await?;
 
     if let Some(data_item) = file.data(fs, "") {
         let data_item = data_item?;
         let data_attribute = data_item.to_attribute()?;
         let mut data_value = data_attribute.value(fs)?;
         let mut buf = [0u8; 8192];
+        let mut buf2 = [0u8; 8192];
+        let mut write_op = None;
 
+        // Write Overlap IO
         loop {
             let bytes_read = data_value.read(fs, &mut buf)?;
+            if let Some(op) = write_op.take() {
+                op.await?;
+            }
             if bytes_read == 0 {
                 break;
             }
+            write_op = Some(output_file.write_all(&buf[..bytes_read]));
 
-            output_file.write_all(&buf[..bytes_read])?;
+            let bytes_read = data_value.read(fs, &mut buf2)?;
+            if let Some(op) = write_op.take() {
+                op.await?;
+            }
+            if bytes_read == 0 {
+                break;
+            }
+            write_op = Some(output_file.write_all(&buf2[..bytes_read]));
+
         }
     }
 
     Ok(())
 }
 
-fn extract_ntfs_directory<T: Read + Seek>(
+async fn extract_ntfs_directory<T: Read + Seek>(
     ntfs: &Ntfs,
     fs: &mut T,
     directory: &NtfsFile<'_>,
@@ -213,9 +240,9 @@ fn extract_ntfs_directory<T: Read + Seek>(
         let child_output_path = output_dir.join(&name);
 
         if file_name.is_directory() {
-            extract_ntfs_directory(ntfs, fs, &child, &child_output_path)?;
+            Box::pin(extract_ntfs_directory(ntfs, fs, &child, &child_output_path)).await?;
         } else {
-            extract_ntfs_file(fs, &child, &child_output_path)?;
+            extract_ntfs_file(fs, &child, &child_output_path).await?;
         }
     }
 
@@ -385,7 +412,7 @@ impl XvdFile {
     }
 }
 
-pub fn unpack_file(
+pub async fn unpack_file(
     xvd: XvdFile,
     path: String,
     destination: String,
@@ -448,6 +475,6 @@ pub fn unpack_file(
     let root = ntfs.root_directory(&mut fs).unwrap();
     let extract_root = PathBuf::from(destination);
     println!("extracting data directory to {}", extract_root.display());
-    extract_ntfs_directory(&ntfs, &mut fs, &root, &extract_root)?;
+    extract_ntfs_directory(&ntfs, &mut fs, &root, &extract_root).await?;
     Ok(())
 }

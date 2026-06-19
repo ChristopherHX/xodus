@@ -31,6 +31,7 @@ use crate::{
 
 const DEFAULT_HTTP_READ_AHEAD_BYTES: usize = 4 * 1024 * 1024;
 const SMALL_FORWARD_SEEK_LIMIT: usize = 4 * 1024 * 1024;
+const PREFIX_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
 
 fn seek_target(current: u64, len: u64, pos: SeekFrom) -> io::Result<u64> {
     let new_offset = match pos {
@@ -751,6 +752,101 @@ pub trait ReadExactAt: Read + Seek {
 
 impl<T: Read + Seek> ReadExactAt for T {}
 
+struct PrefixCacheReader<'t> {
+    inner: &'t mut dyn ReadExactAt,
+    pos: u64,
+    len: u64,
+    cache: Vec<u8>,
+}
+
+impl<'t> PrefixCacheReader<'t> {
+    fn new(inner: &'t mut dyn ReadExactAt) -> io::Result<Self> {
+        let pos = inner.stream_position()?;
+        let len = inner.seek(SeekFrom::End(0))?;
+        inner.seek(SeekFrom::Start(pos))?;
+
+        Ok(Self {
+            inner,
+            pos,
+            len,
+            cache: Vec::new(),
+        })
+    }
+
+    fn ensure_cached(&mut self, end: u64) -> io::Result<()> {
+        let target = end.min(self.len).min(PREFIX_CACHE_LIMIT_BYTES);
+        let cached_end = self.cache.len() as u64;
+        if target <= cached_end {
+            return Ok(());
+        }
+
+        self.inner.seek(SeekFrom::Start(cached_end))?;
+        let missing = usize::try_from(target - cached_end)
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "cache extension too large"))?;
+        let start = self.cache.len();
+        self.cache.resize(start + missing, 0);
+        self.inner.read_exact(&mut self.cache[start..])?;
+        Ok(())
+    }
+
+    fn read_sparse(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() || offset >= self.len {
+            return Ok(0);
+        }
+
+        let available = usize::try_from((self.len - offset).min(buf.len() as u64))
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "available sparse range too large"))?;
+        self.inner.read_exact_at(&mut buf[..available], offset)?;
+        Ok(available)
+    }
+}
+
+impl Read for PrefixCacheReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() || self.pos >= self.len {
+            return Ok(0);
+        }
+
+        let end = self
+            .pos
+            .checked_add(buf.len() as u64)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "read range overflow"))?;
+        self.ensure_cached(end)?;
+        let cached_end = self.cache.len() as u64;
+
+        if self.pos >= cached_end {
+            let read = self.read_sparse(self.pos, buf)?;
+            self.pos += read as u64;
+            return Ok(read);
+        }
+
+        let cached_available = usize::try_from((cached_end - self.pos).min(buf.len() as u64))
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "cached range too large"))?;
+        let start = usize::try_from(self.pos)
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "offset too large"))?;
+        let end = start + cached_available;
+        buf[..cached_available].copy_from_slice(&self.cache[start..end]);
+
+        if cached_available == buf.len() {
+            self.pos += cached_available as u64;
+            return Ok(cached_available);
+        }
+
+        let sparse_offset = self.pos + cached_available as u64;
+        let sparse_read = self.read_sparse(sparse_offset, &mut buf[cached_available..])?;
+        self.pos += (cached_available + sparse_read) as u64;
+        Ok(cached_available + sparse_read)
+    }
+}
+
+impl Seek for PrefixCacheReader<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let new_pos = seek_target(self.pos, self.len, pos)?;
+        self.pos = new_pos;
+        Ok(self.pos)
+    }
+}
+
 pub fn parse_file<T: ReadExactAt>(mut file: T) -> Result<XvdFile, Box<dyn std::error::Error>> {
     let mut header_buffer = [0u8; 4096];
     let mut info_buffer = [0u8; 0xDA8];
@@ -998,172 +1094,173 @@ pub fn parse_file<T: ReadExactAt>(mut file: T) -> Result<XvdFile, Box<dyn std::e
         });
     }
 
-    // let mut user_data_header_buf = [0u8; 128 / 8];
-    // sfile
-    //     .read_exact_at(&mut user_data_header_buf, user_data_offset)
-    //     .unwrap();
-    // let user_data_header: XvdUserDataHeader = transmute!(user_data_header_buf);
-    // if user_data_header.t == 0 {
-    //     let mut off = user_data_offset + user_data_header.length as u64;
-    //     let mut user_data_package_files_header_buf = [0u8; 4224 / 8];
-    //     sfile
-    //         .read_exact_at(&mut user_data_package_files_header_buf, off)
-    //         .unwrap();
-    //     let user_data_package_files_header: XvdUserDataPackageFilesHeader =
-    //         transmute!(user_data_package_files_header_buf);
-    //     let c = user_data_package_files_header.file_count;
-    //     let fullname = user_data_package_files_header.package_full_name;
-    //     println!(
-    //         "package {} / file count {}",
-    //         String::from_utf16(&fullname).unwrap(),
-    //         c
-    //     );
-    //     off += user_data_package_files_header_buf.len() as u64;
-    //     for _ in 0..user_data_package_files_header.file_count {
-    //         let mut user_data_package_files_header_buf = [0u8; 4224 / 8];
-    //         sfile
-    //             .read_exact_at(&mut user_data_package_files_header_buf, off)
-    //             .unwrap();
-    //         let user_data_package_file_entry: XvdUserDataPackageFileEntry =
-    //             transmute!(user_data_package_files_header_buf);
-    //         off += user_data_package_files_header_buf.len() as u64;
-    //         let o = user_data_package_file_entry.offset;
-    //         let s: u32 = user_data_package_file_entry.size;
-    //         let fullname = user_data_package_file_entry.file_path;
-    //         let end = fullname
-    //             .iter()
-    //             .position(|&c| c == 0)
-    //             .unwrap_or(fullname.len());
-    //         let pfull_name: String = String::from_utf16(&fullname[..end]).unwrap();
-    //         println!("file {} / file offset {} size {}", pfull_name, o, s);
-
-    //         if pfull_name == "SegmentMetadata.bin" {
-    //             let mut buf = [0u8; 800 / 8];
-    //             sfile
-    //                 .read_exact_at(
-    //                     &mut buf,
-    //                     user_data_offset + user_data_header_buf.len() as u64 + o as u64,
-    //                 )
-    //                 .unwrap();
-    //             let segment_header: XvdSegmentMetadataHeader = transmute!(buf);
-    //             let paths_offset = segment_header.header_length as u64
-    //                 + segment_header.segment_count as u64 * 0x10;
-    //             let mut seg_metadata: Vec<u8> = vec![];
-    //             seg_metadata.resize(segment_header.segment_count as usize * 0x10, 0);
-    //             sfile
-    //                 .read_exact_at(
-    //                     &mut seg_metadata,
-    //                     (user_data_offset
-    //                         + user_data_header_buf.len() as u64
-    //                         + o as u64
-    //                         + segment_header.header_length as u64) as u64                    )
-    //                 .unwrap();
-    //             for section in &mut enc_sections {
-    //                 let mut page_offset = section.section_offset.div_ceil(PAGE_SIZE as u64);
-    //                 for segment_no in section.first_segment_index..segment_header.segment_count {
-    //                     let start = segment_no as usize * 0x10;
-    //                     let end = start + 0x10;
-
-    //                     let bytes: [u8; 0x10] = seg_metadata[start..end].try_into().unwrap();
-    //                     let segment: XvdSegmentMetadataSegment = transmute!(bytes);
-    //                     let s = segment.path_length;
-    //                     let mut buf = vec![0u16, 0];
-    //                     buf.resize(s as usize, 0);
-    //                     sfile
-    //                         .read_exact_at(
-    //                             buf.as_mut_bytes(),
-    //                             (user_data_offset
-    //                                 + o as u64
-    //                                 + user_data_header_buf.len() as u64
-    //                                 + paths_offset
-    //                                 + segment.path_offset as u64)
-    //                                 as u64,
-    //                         )
-    //                         .unwrap();
-    //                     let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
-    //                     println!(
-    //                         "{segment_no}/{page_offset} {} {}",
-    //                         if segment.flags == 1 { "E" } else { " " },
-    //                         file_name
-    //                     );
-    //                     let page_length = if segment.filesize == 0 {
-    //                         1
-    //                     } else {
-    //                         segment.filesize.div_ceil(PAGE_SIZE as u64)
-    //                     };
-    //                     if !(page_offset * (PAGE_SIZE as u64)
-    //                         < section.section_offset + section.section_length)
-    //                     {
-    //                         break;
-    //                     }
-    //                     section.files.push(FileSegment {
-    //                         file_name,
-    //                         data_offset: page_offset * PAGE_SIZE as u64,
-    //                         data_length: segment.filesize,
-    //                         page_offset,
-    //                         page_length,
-    //                         keep_encrypted: segment.flags == 1,
-    //                     });
-    //                     page_offset += page_length;
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-
-    sfile.seek(SeekFrom::Start(drive_data_offset)).unwrap();
-    let gp = gpt::GptConfig::new()
-        .writable(false)
-        .logical_block_size(gpt::disk::LogicalBlockSize::Lb4096)
-        .open_from_device(XvdStream {
-            file: &mut sfile,
-            offset: drive_data_offset,
-            end_offset: drive_data_offset + xvd_header.drive_size,
-            pos: 0,
-            encryption_info: None,
-        })
+    let mut user_data_header_buf = [0u8; 128 / 8];
+    sfile
+        .read_exact_at(&mut user_data_header_buf, user_data_offset)
         .unwrap();
-
-    let mut ntfs_partition = None;
-    for (index, part) in gp.partitions() {
-        if !part.is_used() {
-            continue;
-        }
-
-        let part_start = part.bytes_start(*gp.logical_block_size()).unwrap();
-        let part_len = part.bytes_len(*gp.logical_block_size()).unwrap();
+    let user_data_header: XvdUserDataHeader = transmute!(user_data_header_buf);
+    if user_data_header.t == 0 {
+        let mut off = user_data_offset + user_data_header.length as u64;
+        let mut user_data_package_files_header_buf = [0u8; 4224 / 8];
+        sfile
+            .read_exact_at(&mut user_data_package_files_header_buf, off)
+            .unwrap();
+        let user_data_package_files_header: XvdUserDataPackageFilesHeader =
+            transmute!(user_data_package_files_header_buf);
+        let c = user_data_package_files_header.file_count;
+        let fullname = user_data_package_files_header.package_full_name;
         println!(
-            "#{index}: '{}' start={} len={}",
-            part.name, part_start, part_len,
+            "package {} / file count {}",
+            String::from_utf16(&fullname).unwrap(),
+            c
         );
+        off += user_data_package_files_header_buf.len() as u64;
+        for _ in 0..user_data_package_files_header.file_count {
+            let mut user_data_package_files_header_buf = [0u8; 4224 / 8];
+            sfile
+                .read_exact_at(&mut user_data_package_files_header_buf, off)
+                .unwrap();
+            let user_data_package_file_entry: XvdUserDataPackageFileEntry =
+                transmute!(user_data_package_files_header_buf);
+            off += user_data_package_files_header_buf.len() as u64;
+            let o = user_data_package_file_entry.offset;
+            let s: u32 = user_data_package_file_entry.size;
+            let fullname = user_data_package_file_entry.file_path;
+            let end = fullname
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(fullname.len());
+            let pfull_name: String = String::from_utf16(&fullname[..end]).unwrap();
+            println!("file {} / file offset {} size {}", pfull_name, o, s);
 
-        if ntfs_partition.is_none() {
-            ntfs_partition = Some((index, part.name.clone(), part_start, part_len));
+            if pfull_name == "SegmentMetadata.bin" {
+                let mut buf = [0u8; 800 / 8];
+                sfile
+                    .read_exact_at(
+                        &mut buf,
+                        user_data_offset + user_data_header_buf.len() as u64 + o as u64,
+                    )
+                    .unwrap();
+                let segment_header: XvdSegmentMetadataHeader = transmute!(buf);
+                let paths_offset = segment_header.header_length as u64
+                    + segment_header.segment_count as u64 * 0x10;
+                let mut seg_metadata: Vec<u8> = vec![];
+                seg_metadata.resize(segment_header.segment_count as usize * 0x10, 0);
+                sfile
+                    .read_exact_at(
+                        &mut seg_metadata,
+                        (user_data_offset
+                            + user_data_header_buf.len() as u64
+                            + o as u64
+                            + segment_header.header_length as u64) as u64                    )
+                    .unwrap();
+                for section in &mut enc_sections {
+                    let mut page_offset = section.section_offset.div_ceil(PAGE_SIZE as u64);
+                    for segment_no in section.first_segment_index..segment_header.segment_count {
+                        let start = segment_no as usize * 0x10;
+                        let end = start + 0x10;
+
+                        let bytes: [u8; 0x10] = seg_metadata[start..end].try_into().unwrap();
+                        let segment: XvdSegmentMetadataSegment = transmute!(bytes);
+                        let s = segment.path_length;
+                        let mut buf = vec![0u16, 0];
+                        buf.resize(s as usize, 0);
+                        sfile
+                            .read_exact_at(
+                                buf.as_mut_bytes(),
+                                (user_data_offset
+                                    + o as u64
+                                    + user_data_header_buf.len() as u64
+                                    + paths_offset
+                                    + segment.path_offset as u64)
+                                    as u64,
+                            )
+                            .unwrap();
+                        let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
+                        println!(
+                            "{segment_no}/{page_offset} {} {}",
+                            if segment.flags == 1 { "E" } else { " " },
+                            file_name
+                        );
+                        let page_length = if segment.filesize == 0 {
+                            1
+                        } else {
+                            segment.filesize.div_ceil(PAGE_SIZE as u64)
+                        };
+                        if !(page_offset * (PAGE_SIZE as u64)
+                            < section.section_offset + section.section_length)
+                        {
+                            break;
+                        }
+                        section.files.push(FileSegment {
+                            file_name,
+                            data_offset: page_offset * PAGE_SIZE as u64,
+                            data_length: segment.filesize,
+                            page_offset,
+                            page_length,
+                            keep_encrypted: segment.flags == 1,
+                        });
+                        page_offset += page_length;
+                    }
+                }
+            }
         }
     }
 
-    let (_, _, part_start, part_len) = ntfs_partition.expect("no used GPT partition found");
-    let partition_offset = drive_data_offset + part_start;
+    // let gp = gpt::GptConfig::new()
+    //     .writable(false)
+    //     .logical_block_size(gpt::disk::LogicalBlockSize::Lb4096)
+    //     .open_from_device(XvdStream {
+    //         file: &mut sfile,
+    //         offset: drive_data_offset,
+    //         end_offset: drive_data_offset + xvd_header.drive_size,
+    //         pos: 0,
+    //         encryption_info: None,
+    //     })
+    //     .unwrap();
 
-    let mut fs = XvdStream {
-        file: &mut sfile,
-        offset: partition_offset,
-        end_offset: partition_offset + part_len,
-        pos: 0,
-        // encryption_info: Some(XvdEncryptionInfo {
-        //     full_key,
-        //     encrypted_sections: enc_sections,
-        // }),
-        encryption_info: None,
-    };
-    // fs.seek(SeekFrom::Start(0)).unwrap();
-    let mut ntfs = Ntfs::new(&mut fs).unwrap();
+    // let mut ntfs_partition = None;
+    // for (index, part) in gp.partitions() {
+    //     if !part.is_used() {
+    //         continue;
+    //     }
 
-    ntfs.read_upcase_table(&mut fs).unwrap();
+    //     let part_start = part.bytes_start(*gp.logical_block_size()).unwrap();
+    //     let part_len = part.bytes_len(*gp.logical_block_size()).unwrap();
+    //     println!(
+    //         "#{index}: '{}' start={} len={}",
+    //         part.name, part_start, part_len,
+    //     );
 
-    let root = ntfs.root_directory(&mut fs).unwrap();
+    //     if ntfs_partition.is_none() {
+    //         ntfs_partition = Some((index, part.name.clone(), part_start, part_len));
+    //     }
+    // }
 
-    extract_segments(&ntfs, &mut fs, &root, Path::new(""), &mut enc_sections).unwrap();
+    // let (_, _, part_start, part_len) = ntfs_partition.expect("no used GPT partition found");
+    // let partition_offset = drive_data_offset + part_start;
+    // let mut cached_file = PrefixCacheReader::new(&mut sfile)?;
+    // cached_file.seek(SeekFrom::Start(partition_offset)).unwrap();
+
+    // let mut fs = XvdStream {
+    //     file: &mut cached_file,
+    //     offset: partition_offset,
+    //     end_offset: partition_offset + part_len,
+    //     pos: 0,
+    //     // encryption_info: Some(XvdEncryptionInfo {
+    //     //     full_key,
+    //     //     encrypted_sections: enc_sections,
+    //     // }),
+    //     encryption_info: None,
+    // };
+    // // fs.seek(SeekFrom::Start(0)).unwrap();
+    // let mut ntfs = Ntfs::new(&mut fs).unwrap();
+
+    // ntfs.read_upcase_table(&mut fs).unwrap();
+
+    // let root = ntfs.root_directory(&mut fs).unwrap();
+
+    // extract_segments(&ntfs, &mut fs, &root, Path::new(""), &mut enc_sections).unwrap();
 
     Ok(XvdFile {
         content_id: uuid::Uuid::from_bytes_le(xvd_header.vduid).to_string(),
@@ -1221,7 +1318,7 @@ fn extract_segments<T: Read + Seek>(
                     }
                     for sec in &mut *enc_sections {
                         if data_start >= sec.section_offset as usize && data_start < (sec.section_offset + sec.section_length) as usize {
-                            if data_start + data_size >= (sec.section_offset + sec.section_length) as usize {
+                            if data_start + data_size > (sec.section_offset + sec.section_length) as usize {
                                 todo!("NTFS crosses section");
                             }
                             sec.files.push(FileSegment { file_name: child_output_path.to_string_lossy().into_owned(), data_offset: data_start as u64, data_length: data_size as u64, page_offset: offset_to_page_number(data_start as u64), page_length: offset_to_page_number(data_size as u64), keep_encrypted: false });

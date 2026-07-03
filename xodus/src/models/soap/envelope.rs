@@ -61,14 +61,14 @@ impl Envelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Header {
     #[serde(rename = "wsa:Action", alias = "Action")]
-    pub action: MustUnderstandValue,
+    pub action: Option<MustUnderstandValue>,
     #[serde(rename = "wsa:To", alias = "To")]
-    pub to: MustUnderstandValue,
+    pub to: Option<MustUnderstandValue>,
     #[serde(rename = "wsa:MessageID")]
     pub message_id: Option<String>,
     #[serde(rename = "ps:AuthInfo")]
     pub auth_info: Option<AuthInfo>,
-    #[serde(rename = "wsse:Security", alias = "Security")]
+    #[serde(rename = "wsse:Security", alias = "Security", default)]
     pub security: Security,
     #[serde(
         rename = "psf:EncryptedPP",
@@ -88,14 +88,14 @@ impl Header {
     pub fn new() -> Self {
         let now = chrono::Utc::now();
         Self {
-            action: MustUnderstandValue {
+            action: Some(MustUnderstandValue {
                 must_understand: Some("1".to_owned()),
                 value: "http://schemas.xmlsoap.org/ws/2005/02/trust/RST/Issue".to_owned(),
-            },
-            to: MustUnderstandValue {
+            }),
+            to: Some(MustUnderstandValue {
                 must_understand: Some("1".to_owned()),
                 value: "https://login.live.com:443/RST2.srf".to_owned(),
-            },
+            }),
             message_id: Some(now.timestamp().to_string()),
             auth_info: Some(AuthInfo::default()),
             security: Security {
@@ -125,9 +125,12 @@ pub struct Body {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BodyContent {
-    #[serde(rename = "wst:RequestSecurityToken")]
+    #[serde(rename = "wst:RequestSecurityToken", alias = "RequestSecurityToken")]
     RequestSecurityToken(RequestSecurityToken),
-    #[serde(rename = "ps:RequestMultipleSecurityTokens")]
+    #[serde(
+        rename = "ps:RequestMultipleSecurityTokens",
+        alias = "RequestMultipleSecurityTokens"
+    )]
     RequestMultipleSecurityTokens(RequestMultipleSecurityTokens),
 
     RequestSecurityTokenResponseCollection(RequestSecurityTokenResponseCollection),

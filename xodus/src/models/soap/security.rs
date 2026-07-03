@@ -11,8 +11,8 @@ pub struct AuthInfo {
     #[serde(rename = "@Id")]
     pub id: String,
 
-    #[serde(rename = "ps:SSOFlags")]
-    pub sso_flags: String,
+    #[serde(rename = "ps:SSOFlags", skip_serializing_if = "Option::is_none")]
+    pub sso_flags: Option<String>,
     #[serde(rename = "ps:HostingApp")]
     pub hosting_app: String,
     #[serde(rename = "ps:BinaryVersion")]
@@ -23,6 +23,8 @@ pub struct AuthInfo {
     pub inline_ux: String,
     #[serde(rename = "ps:IsAdmin")]
     pub is_admin: String,
+    #[serde(rename = "ps:PackageSID", skip_serializing_if = "Option::is_none")]
+    pub package_sid: Option<String>,
     #[serde(rename = "ps:Cookies")]
     pub cookies: Option<String>,
     #[serde(rename = "ps:RequestParams")]
@@ -45,18 +47,19 @@ pub struct AuthInfo {
 impl Default for AuthInfo {
     fn default() -> Self {
         Self {
-            sso_flags: "".to_string(),
+            sso_flags: None,
             ps: "http://schemas.microsoft.com/Passport/SoapServices/PPCRL".to_owned(),
             id: "PPAuthInfo".to_owned(),
             hosting_app: "{DF60E2DF-88AD-4526-AE21-83D130EF0F68}".to_owned(),
-            binary_version: "55".to_owned(),
+            binary_version: "45".to_owned(),
             ui_version: "1".to_owned(),
             is_connected: None,
             inline_ux: "TokenBroker".to_owned(),
             is_admin: "1".to_owned(),
-            cookies: None,
+            package_sid: None,
+            cookies: Some(String::new()),
             request_params: "AQAAAAIAAABsYwQAAAAxMDMz".to_owned(),
-            windows_client_string: "b4d/QB7Zy5pjUAY9ByQ1echTyTITx6ZCErOEztuIVtw=".to_owned(),
+            windows_client_string: "Jkdh4zhtxPOMrTEt1VdNxpIv69KZf0LYmRXRrA6rcvY=".to_owned(),
             license_signature_key_version: Some("2".to_owned()),
             client_capabilities: "1".to_owned(),
             inline_ft: None,
@@ -92,6 +95,23 @@ pub struct Security {
     pub timestamp: Timestamp,
     #[serde(rename = "Signature", skip_serializing_if = "Option::is_none")]
     pub signature: Option<Signature>,
+}
+
+impl Default for Security {
+    fn default() -> Self {
+        Self {
+            username_token: None,
+            encrypted_data: None,
+            binary_security_token: vec![],
+            derived_key_tokens: vec![],
+            timestamp: Timestamp {
+                id: None,
+                created: String::new(),
+                expires: String::new(),
+            },
+            signature: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

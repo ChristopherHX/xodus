@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<S:Envelope xmlns:S="http://www.w3.org/2003/05/soap-envelope" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:wst="http://schemas.xmlsoap.org/ws/2005/02/trust" xmlns:psf="http://schemas.microsoft.com/Passport/SoapServices/SOAPFault">
+  <S:Header>
+    <wsa:Action xmlns:S="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://www.w3.org/2005/08/addressing" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" wsu:Id="Action" S:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2005/02/trust/RSTR/Issue</wsa:Action>
+    <wsa:To xmlns:S="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://www.w3.org/2005/08/addressing" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" wsu:Id="To" S:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
+    <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wssc="http://schemas.xmlsoap.org/ws/2005/02/sc">
+      <wsu:Timestamp xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" wsu:Id="TS">
+        <wsu:Created>2026-07-02T11:48:19Z</wsu:Created>
+        <wsu:Expires>2026-07-02T11:53:19Z</wsu:Expires>
+      </wsu:Timestamp>
+      <wssc:DerivedKeyToken wsu:Id="SignKey" Algorithm="urn:liveid:SP800108_CTR_HMAC_SHA256_DOUBLEDERIVED">
+        <wsse:SecurityTokenReference>
+          <wsse:Reference URI="C2MwRf6C8FQI39Qi7xmzJrwdQ9M="/>
+        </wsse:SecurityTokenReference>
+        <wssc:Nonce>ddnPRlpD8e3mMfztH7NbUetOv/G+3oS2RVSk1tThuuE=</wssc:Nonce>
+      </wssc:DerivedKeyToken>
+      <wssc:DerivedKeyToken wsu:Id="EncKey" Algorithm="urn:liveid:SP800108_CTR_HMAC_SHA256_DOUBLEDERIVED">
+        <wsse:SecurityTokenReference>
+          <wsse:Reference URI="C2MwRf6C8FQI39Qi7xmzJrwdQ9M="/>
+        </wsse:SecurityTokenReference>
+        <wssc:Nonce>56Ew8EylbSlWAKohe38dINHngJgCjb8LvE+ywMF9BMo=</wssc:Nonce>
+      </wssc:DerivedKeyToken>
+      <Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
+        <SignedInfo>
+          <CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+          <SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#hmac-sha256"/>
+          <Reference URI="#EncPsf">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>vVnndfnC4LQwAh37eLi5aTGwEQiVpRq8t/ZhzLIznmk=</DigestValue>
+          </Reference>
+          <Reference URI="#To">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>bdqxjfqbXAvnW37B+I0LGQNCFrl4hGLZ/joOFUKtayc=</DigestValue>
+          </Reference>
+          <Reference URI="#Action">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>I9OmA6/3cHJ2+mtJxFNoY3p1Pky2heThzqT05pH0EK8=</DigestValue>
+          </Reference>
+          <Reference URI="#TS">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>0hz1S2gP/61pmVZXBKnnyy4CMFRhMT77GoI9AsNtGV4=</DigestValue>
+          </Reference>
+        </SignedInfo>
+        <SignatureValue>x1Bfk6GVu22nACQyT7KqGlg9RUnwlBVhR7F59KHg//4=</SignatureValue>
+        <KeyInfo>
+          <wsse:SecurityTokenReference>
+            <wsse:Reference URI="#SignKey"/>
+          </wsse:SecurityTokenReference>
+        </KeyInfo>
+      </Signature>
+      <e:ReferenceList xmlns:e="http://www.w3.org/2001/04/xmlenc#">
+        <e:DataReference URI="#EncPsf"/>
+      </e:ReferenceList>
+    </wsse:Security>
+    <psf:EncryptedPP xmlns:psf="http://schemas.microsoft.com/Passport/SoapServices/SOAPFault">
+      <EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#" Id="EncPsf" Type="http://www.w3.org/2001/04/xmlenc#Element">
+        <EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes256-cbc"/>
+        <KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#">
+          <wsse:SecurityTokenReference xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+            <wsse:Reference URI="#EncKey"/>
+          </wsse:SecurityTokenReference>
+        </KeyInfo>
+        <CipherData>
+          <CipherValue>6+ZLHNMzcZlIzOEpXIRrYjTDTLOvnpltREE8A84rhuXkYooh5mjVeQULTmEmtiIU/6m3b29C8vbYgHaYbLr9bQ71uVpCcmxri25zB3qB7ZmLRWwDOHRLsC71OJki+bxYDvUqqVjKVHuL1zhoz4p+hmJ3n3sD6BTxaNyguENffNKPfLX87+3engZMfsSPr4IVrW3pSN9BGqwVI7EIP0usNJB9LVRe90ENNluSBstQusb5P28F/7HHb6gPHx3Pkl2MwNXF6AKLff1YiLFW8cFlFWYX8kCgNwD5jmvSD1HQH0Q7Sy2pkTfjDDjxsYgLyKftBx6P7eqsq1YhbO8OjMBUoMQkoZY3o6WSIiITsTdYXuQuT971M85fJjoMiksb2HGOaMlW2BJlrdRLQx9M+Qj9fdLGJJqyCW2l0JD4T6SLNHk+hhNjwVNqMtqHs0+gcyHzionVQEil/lRj0dWmHRBcfCiPQSpSKBfM3WOzYH2oWGdo08ZrHi03aNS/2iMrhpwYc2sdBPUI8BEDqre5RtLXmfWTm5QfCrM1y+C+xZrM9bQqL7ynSCZ1mCnSPaSdRGu+GM+v1DvckRmMAbxU03D7ofUcUZTZb1xUNqVKDWBCGaH1V/85YodgOq3oe/IKWhHVHbMD4lbZmiE3W5r0AlSKumjPKM4aCsTGd9vSC1zxq/lh28+EhVVmwU58Mtu1gAndjwhju+b/oUP9SmbY7TMUrmkaShfazRqVC57rCyQKlPQPfwiWM9ZYSOid/8OG1aMo</CipherValue>
+        </CipherData>
+      </EncryptedData>
+    </psf:EncryptedPP>
+  </S:Header>
+  <S:Body>
+    <S:Fault>
+      <S:Code>
+        <S:Value>S:Receiver</S:Value>
+      </S:Code>
+      <S:Reason>
+        <S:Text xml:lang="en-US">Internal Server Error</S:Text>
+      </S:Reason>
+      <S:Detail>
+        <psf:error>
+          <psf:value>0x80048820</psf:value>
+          <psf:internalerror>
+            <psf:code>0x8004a98a</psf:code>
+            <psf:text>V1 Access token is deprecated.
+</psf:text>
+          </psf:internalerror>
+        </psf:error>
+      </S:Detail>
+    </S:Fault>
+  </S:Body>
+</S:Envelope>

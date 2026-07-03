@@ -1,5 +1,6 @@
 use base64::prelude::*;
 use bergshamra::{DsigContext, Key, KeyData, KeyUsage, KeysManager};
+use log::{debug, warn};
 use rsa::rand_core::{OsRng, RngCore};
 
 use crate::models::devicecredential::{DeviceAddRequest, DeviceAddResponse};
@@ -13,6 +14,28 @@ use crate::models::soap::{
 mod utils;
 
 pub const XML_HEADER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>"#;
+
+#[derive(Debug, Clone, Default)]
+pub struct ExchangeDeviceTokenOptions {
+    pub sso_flags: Option<String>,
+    pub hosting_app: Option<String>,
+    pub inline_ux: Option<String>,
+    pub package_sid: Option<String>,
+    pub request_params: Option<String>,
+    pub windows_client_string: Option<String>,
+    pub binary_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ExchangeUserTokenOptions {
+    pub sso_flags: Option<String>,
+    pub hosting_app: Option<String>,
+    pub inline_ux: Option<String>,
+    pub package_sid: Option<String>,
+    pub request_params: Option<String>,
+    pub windows_client_string: Option<String>,
+    pub binary_version: Option<String>,
+}
 
 pub async fn login_device_credential(
     client: &reqwest::Client,
@@ -78,10 +101,46 @@ pub async fn exchange_device_token(
     scope: String,
     policy: Option<soap::PolicyReference>,
 ) -> reqwest::Result<soap::RequestSecurityTokenResponse> {
+    exchange_device_token_with_options(
+        client,
+        token,
+        shared_secret,
+        hosting_app,
+        scope,
+        policy,
+        ExchangeDeviceTokenOptions::default(),
+    )
+    .await
+}
+
+pub async fn exchange_device_token_with_options(
+    client: &reqwest::Client,
+    token: String,
+    shared_secret: String,
+    hosting_app: String,
+    scope: String,
+    policy: Option<soap::PolicyReference>,
+    options: ExchangeDeviceTokenOptions,
+) -> reqwest::Result<soap::RequestSecurityTokenResponse> {
     let mut header = soap::Header::new();
     if let Some(i) = header.auth_info.as_mut() {
-        i.hosting_app = hosting_app;
-        i.sso_flags = "SsoRestr".to_string();
+        i.hosting_app = options.hosting_app.unwrap_or(hosting_app);
+        i.sso_flags = options.sso_flags;
+        if let Some(inline_ux) = options.inline_ux {
+            i.inline_ux = inline_ux;
+        }
+        if let Some(package_sid) = options.package_sid {
+            i.package_sid = Some(package_sid);
+        }
+        if let Some(request_params) = options.request_params {
+            i.request_params = request_params;
+        }
+        if let Some(windows_client_string) = options.windows_client_string {
+            i.windows_client_string = windows_client_string;
+        }
+        if let Some(binary_version) = options.binary_version {
+            i.binary_version = binary_version;
+        }
     }
     let encrypted_data = quick_xml::de::from_str(&token).unwrap();
     header.security.encrypted_data = Some(encrypted_data);
@@ -101,7 +160,7 @@ pub async fn exchange_device_token(
         id: "SignKey".to_string(),
         algorithm: "urn:liveid:SP800108_CTR_HMAC_SHA256_DOUBLEDERIVED".to_string(),
         token_reference: None,
-        requested_token_reference: Some(soap::RequestedTokenReference { key_identifier: soap::KeyIdentifier { value_type: "http://docs.oasis-open.org/wss/2004/XX/oasis-2004XX-wss-saml-token-profile-1.0#SAMLAssertionID".to_string(), value: None }, reference: soap::ReferenceUri { uri: "".to_string() } })
+        requested_token_reference: Some(soap::RequestedTokenReference { key_identifier: Some(soap::KeyIdentifier { value_type: "http://docs.oasis-open.org/wss/2004/XX/oasis-2004XX-wss-saml-token-profile-1.0#SAMLAssertionID".to_string(), value: None }), reference: soap::ReferenceUri { uri: "".to_string() } })
     }];
     header.security.signature = Some(soap::Signature {
         xmlns: "http://www.w3.org/2000/09/xmldsig#".to_string(),
@@ -224,10 +283,10 @@ pub async fn exchange_device_token(
     let result = bergshamra::verify(&ctx, &text).unwrap();
     match result {
         bergshamra::VerifyResult::Invalid { reason } => {
-            println!("DEVICE {}", reason);
+            warn!("DEVICE {}", reason);
         }
         bergshamra::VerifyResult::Valid { .. } => {
-            println!("signature valid");
+            debug!("signature valid");
         }
     }
 
@@ -237,6 +296,7 @@ pub async fn exchange_device_token(
             let token = collection.security_tokens.remove(0);
             Ok(token)
         }
+        (soap::BodyContent::Fault(fault), _) => unimplemented!("{:?}", text),
         (b, _) => unimplemented!("Exchange token supports only singular token right now {b:?}"),
     }
 }
@@ -252,12 +312,54 @@ pub async fn exchange_user_token(
     hosting_app: String,
     scope_policies: &[(String, Option<soap::PolicyReference>)],
 ) -> reqwest::Result<ExchangeUserTokenOutcome> {
+    exchange_user_token_with_options(
+        client,
+        user_token,
+        username,
+        device_token,
+        shared_secret,
+        inline_token,
+        inline_ux,
+        hosting_app,
+        scope_policies,
+        ExchangeUserTokenOptions::default(),
+    )
+    .await
+}
+
+pub async fn exchange_user_token_with_options(
+    client: &reqwest::Client,
+    user_token: String,
+    username: String,
+    device_token: String,
+    shared_secret: String,
+    inline_token: Option<String>,
+    inline_ux: Option<String>,
+    hosting_app: String,
+    scope_policies: &[(String, Option<soap::PolicyReference>)],
+    options: ExchangeUserTokenOptions,
+) -> reqwest::Result<ExchangeUserTokenOutcome> {
     let mut header = soap::Header::new();
     if let Some(i) = header.auth_info.as_mut() {
-        i.hosting_app = hosting_app;
-        i.sso_flags = "SsoRestr".to_string();
+        i.hosting_app = options.hosting_app.unwrap_or(hosting_app);
+        i.sso_flags = options.sso_flags.or(Some("SsoRestr".to_string()));
         i.license_signature_key_version = None;
-        i.inline_ux = inline_ux.unwrap_or("TokenBroker".to_string());
+        i.inline_ux = options
+            .inline_ux
+            .or(inline_ux)
+            .unwrap_or("TokenBroker".to_string());
+        if let Some(package_sid) = options.package_sid {
+            i.package_sid = Some(package_sid);
+        }
+        if let Some(request_params) = options.request_params {
+            i.request_params = request_params;
+        }
+        if let Some(windows_client_string) = options.windows_client_string {
+            i.windows_client_string = windows_client_string;
+        }
+        if let Some(binary_version) = options.binary_version {
+            i.binary_version = binary_version;
+        }
         i.inline_ft = inline_token
     }
     header.security.username_token = Some(soap::UsernameToken::user_hint(username));
@@ -287,7 +389,7 @@ pub async fn exchange_user_token(
         id: "SignKey".to_string(),
         algorithm: "urn:liveid:SP800108_CTR_HMAC_SHA256_DOUBLEDERIVED".to_string(),
         token_reference: None,
-        requested_token_reference: Some(soap::RequestedTokenReference { key_identifier: soap::KeyIdentifier { value_type: "http://docs.oasis-open.org/wss/2004/XX/oasis-2004XX-wss-saml-token-profile-1.0#SAMLAssertionID".to_string(), value: None }, reference: soap::ReferenceUri { uri: "#DeviceDAToken".to_string() } })
+        requested_token_reference: Some(soap::RequestedTokenReference { key_identifier: Some(soap::KeyIdentifier { value_type: "http://docs.oasis-open.org/wss/2004/XX/oasis-2004XX-wss-saml-token-profile-1.0#SAMLAssertionID".to_string(), value: None }), reference: soap::ReferenceUri { uri: "#DeviceDAToken".to_string() } })
     }];
     let multiple_policies = scope_policies.len() > 1;
     header.security.signature = Some(soap::Signature {
@@ -438,10 +540,10 @@ pub async fn exchange_user_token(
     let result = bergshamra::verify(&ctx, &text).unwrap();
     match result {
         bergshamra::VerifyResult::Invalid { reason } => {
-            println!("USER {}", reason);
+            warn!("USER {}", reason);
         }
         bergshamra::VerifyResult::Valid { .. } => {
-            println!("signature valid");
+            debug!("signature valid");
         }
     }
 
@@ -451,4 +553,11 @@ pub async fn exchange_user_token(
         soap::BodyContent::Fault(_) => Ok(ExchangeUserTokenOutcome::Fault(pp)),
         body => Ok(ExchangeUserTokenOutcome::Issued(body)),
     }
+}
+
+
+#[tokio::test]
+#[ignore = "requires a real encrypted SOAP fixture"]
+pub async fn test_decrypt_resp() {
+    unimplemented!("add a real encrypted SOAP fixture before enabling this test");
 }

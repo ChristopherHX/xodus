@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<DeviceAddResponse Success="true">
+  <success>true</success>
+  <puid>00184018201E7BA3</puid>
+  <LicenseSignatureKeyVersion>-1</LicenseSignatureKeyVersion>
+  <ServerInfo ServerTime="2026-07-02T11:48:13Z">BL02EPF00066EEA 16.0.31112.12</ServerInfo>
+</DeviceAddResponse>

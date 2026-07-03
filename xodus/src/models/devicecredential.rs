@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, ser::Error};
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct DeviceAddRequest {
     pub client_info: ClientInfo,
@@ -15,7 +15,7 @@ impl std::fmt::Display for DeviceAddRequest {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct ClientInfo {
     #[serde(rename = "@name")]
@@ -35,7 +35,7 @@ impl Default for ClientInfo {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct Authentication {
     pub membername: String,
@@ -51,16 +51,17 @@ impl Authentication {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct DeviceInfo {
     #[serde(rename = "@Id")]
     pub id: String,
     #[serde(rename = "Component")]
     pub components: Vec<Component>,
+    pub tpm_info: Option<TpmInfo>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Component {
     #[serde(rename = "@name")]
     pub name: u32,
@@ -68,6 +69,25 @@ pub struct Component {
     pub value: Option<String>,
     #[serde(rename = "@error")]
     pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct TpmInfo {
+    pub key_value: KeyValue,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct KeyValue {
+    pub rsa_key_value: RsaKeyValue,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct RsaKeyValue {
+    pub modulus: String,
+    pub exponent: String,
 }
 
 impl Component {
@@ -103,7 +123,7 @@ pub struct DeviceAddResponse {
     #[serde(rename = "GlobalDeviceID")]
     pub global_device_id: String,
     pub license_key_sequence: String,
-    pub license_signature_key_version: u32,
+    pub license_signature_key_version: i32,
     pub server_info: ServerInfo,
 }
 

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:ps="http://schemas.microsoft.com/Passport/SoapServices/PPCRL" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:saml="urn:oasis:names:tc:SAML:1.0:assertion" xmlns:wsp="http://schemas.xmlsoap.org/ws/2004/09/policy" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:wsa="http://www.w3.org/2005/08/addressing" xmlns:wssc="http://schemas.xmlsoap.org/ws/2005/02/sc" xmlns:wst="http://schemas.xmlsoap.org/ws/2005/02/trust">
+  <s:Header>
+    <wsa:Action s:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2005/02/trust/RST/Issue</wsa:Action>
+    <wsa:To s:mustUnderstand="1">https://login.live.com:443/RST2.srf</wsa:To>
+    <wsa:MessageID>1782992898</wsa:MessageID>
+    <ps:AuthInfo xmlns:ps="http://schemas.microsoft.com/Passport/SoapServices/PPCRL" Id="PPAuthInfo">
+      <ps:HostingApp>{DF60E2DF-88AD-4526-AE21-83D130EF0F68}</ps:HostingApp>
+      <ps:BinaryVersion>45</ps:BinaryVersion>
+      <ps:UIVersion>1</ps:UIVersion>
+      <ps:InlineUX>TokenBroker</ps:InlineUX>
+      <ps:IsAdmin>1</ps:IsAdmin>
+      <ps:Cookies/>
+      <ps:RequestParams>AQAAAAIAAABsYwQAAAAxMDMz</ps:RequestParams>
+      <ps:WindowsClientString>Jkdh4zhtxPOMrTEt1VdNxpIv69KZf0LYmRXRrA6rcvY=</ps:WindowsClientString>
+      <ps:LicenseSignatureKeyVersion>2</ps:LicenseSignatureKeyVersion>
+      <ps:ClientCapabilities>1</ps:ClientCapabilities>
+    </ps:AuthInfo>
+    <wsse:Security>
+      <wsse:UsernameToken wsu:Id="devicesoftware">
+        <wsse:Username>02rqjuhitmohgosx</wsse:Username>
+      </wsse:UsernameToken>
+      <wsse:BinarySecurityToken ValueType="urn:liveid:device" id="DeviceDAToken">&lt;EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#" Id="devicesoftware" Type="http://www.w3.org/2001/04/xmlenc#Element"&gt;&lt;EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#tripledes-cbc"&gt;&lt;/EncryptionMethod&gt;&lt;ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"&gt;&lt;ds:KeyName&gt;http://Passport.NET/STS&lt;/ds:KeyName&gt;&lt;/ds:KeyInfo&gt;&lt;CipherData&gt;&lt;CipherValue&gt;M.C561_BAY.0.D.MsaArtifacts.Cn3EeWx/jTHbO9YSZ9FVtjXjaVRRNWvMHXkbiXzaoLG9oV4/pInSaTJ5E/M4ze3XzwpqSHxRPdVNWiWofoRX8llokWxclsZUeYSju0gIOKrcGTkkfWdpwc5qceFro+0FatQx3TgVmn8X5jnWjS+IRVYmvWadAxDEzj0JahfOQeM+QcEMN8qgkVersjp7nBOArcHEzd6BZKhRo/rV/ZIX2+LmY8z+jPYy0VgWFOEM3I/Y1i/UccpBldKkFPmYRWevEqcy0OjuuSakItVWQ4M3nmDkDGxDd/nTyvQfr8IR9pTDYdlpWsqNv84MvtpJrevJp7OB7By5moWXDW5ykPQAmJlstjdr1bXrqsi2Mqf96efVrvuL1kcsDxcTtCgfkUpY01pa1A/Vti4iMMwSE2T/6RJrSGZXeXxqMy5f8I15GXQE6+eJcsFWAQzYo6HtLWfRqSDwME1faj7M6yB60YHoDdqfE2l6Qh4E5u+VnbbIGDssghXBkC8BMo5lDoNYriZAtp1B+ugjz2yJeaE4kJfQM4Q=&lt;/CipherValue&gt;&lt;/CipherData&gt;&lt;/EncryptedData&gt;</wsse:BinarySecurityToken>
+      <wsu:Timestamp wsu:Id="Timestamp">
+        <wsu:Created>2026-07-02T11:48:17Z</wsu:Created>
+        <wsu:Expires>2026-07-02T11:53:17Z</wsu:Expires>
+      </wsu:Timestamp>
+      <Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
+        <SignedInfo>
+          <CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+          <SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+          <Reference URI="#RST0">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>x1dexvML1H2TSmybLErItf/TxHV7Bw/h2oLBn0bfBSM=</DigestValue>
+          </Reference>
+          <Reference URI="#PPAuthInfo">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>Q+etNp7yuAByU/vy+fdsu+Tj2vbUScxmyBLcPC8iJXc=</DigestValue>
+          </Reference>
+          <Reference URI="#Timestamp">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>czelVg+0UIXu1JQyIO2XcxfonUuFA6SrIwITd6/tWa8=</DigestValue>
+          </Reference>
+        </SignedInfo>
+        <SignatureValue>Yj9V7to1v06xn+YARwlLedGsquENCZUq0J8olE0OJcuhB+sBs0Qsb3Bb1ZAZbJR/AULCAzDWVgNsUedeRfs46eRQmitu+fUAiuEQtd01KCqt45a+eBQrEFROQJnJrkrCtOD0BQP+Msf9ikrIRUCoUe7ZCQxMt+E4ISy6aFJAMv69GcuODMiFxRqSw8FQmYVJFXx4naIVoNoFmEgh4LBsWOqa7kRh8SfY2y20bMJwe7yGMZXRXVlqB84+Sr2od1hczYbWqHxtx0teTNiz6bxmHrkh5YAROh8IfFERcL2eeXVGJH9ThfIL0JvGeOOj68M07nE9eGtBlQUgxHxjXvXJMQ==</SignatureValue>
+      </Signature>
+    </wsse:Security>
+  </s:Header>
+  <s:Body>
+    <wst:RequestSecurityToken Id="RST0">
+      <wst:RequestType>http://schemas.xmlsoap.org/ws/2005/02/trust/Issue</wst:RequestType>
+      <wsp:AppliesTo>
+        <wsa:EndpointReference>
+          <wsa:Address>http://Passport.NET/tb</wsa:Address>
+        </wsa:EndpointReference>
+      </wsp:AppliesTo>
+    </wst:RequestSecurityToken>
+  </s:Body>
+</s:Envelope>

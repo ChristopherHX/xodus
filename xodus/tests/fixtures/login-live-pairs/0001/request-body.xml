@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<DeviceAddRequest>
+  <ClientInfo name="IDCRL" version="1.0">
+    <BinaryVersion>45</BinaryVersion>
+  </ClientInfo>
+  <Authentication>
+    <Membername>02rqjuhitmohgosx</Membername>
+    <Password>lrAq3Y1#$qvg7D:SAt_B</Password>
+  </Authentication>
+</DeviceAddRequest>

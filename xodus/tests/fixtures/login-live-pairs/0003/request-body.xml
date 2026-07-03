@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:ps="http://schemas.microsoft.com/Passport/SoapServices/PPCRL" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:saml="urn:oasis:names:tc:SAML:1.0:assertion" xmlns:wsp="http://schemas.xmlsoap.org/ws/2004/09/policy" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:wsa="http://www.w3.org/2005/08/addressing" xmlns:wssc="http://schemas.xmlsoap.org/ws/2005/02/sc" xmlns:wst="http://schemas.xmlsoap.org/ws/2005/02/trust">
+  <s:Header>
+    <wsa:Action s:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2005/02/trust/RST/Issue</wsa:Action>
+    <wsa:To s:mustUnderstand="1">https://login.live.com:443/RST2.srf</wsa:To>
+    <wsa:MessageID>1782992897</wsa:MessageID>
+    <ps:AuthInfo xmlns:ps="http://schemas.microsoft.com/Passport/SoapServices/PPCRL" Id="PPAuthInfo">
+      <ps:HostingApp>{DF60E2DF-88AD-4526-AE21-83D130EF0F68}</ps:HostingApp>
+      <ps:BinaryVersion>45</ps:BinaryVersion>
+      <ps:UIVersion>1</ps:UIVersion>
+      <ps:InlineUX>TokenBroker</ps:InlineUX>
+      <ps:IsAdmin>1</ps:IsAdmin>
+      <ps:Cookies/>
+      <ps:RequestParams>AQAAAAIAAABsYwQAAAAxMDMz</ps:RequestParams>
+      <ps:WindowsClientString>Jkdh4zhtxPOMrTEt1VdNxpIv69KZf0LYmRXRrA6rcvY=</ps:WindowsClientString>
+      <ps:LicenseSignatureKeyVersion>2</ps:LicenseSignatureKeyVersion>
+      <ps:ClientCapabilities>1</ps:ClientCapabilities>
+    </ps:AuthInfo>
+    <wsse:Security>
+      <wsse:UsernameToken wsu:Id="devicesoftware">
+        <wsse:Username>02lbryqhqpzbnent</wsse:Username>
+      </wsse:UsernameToken>
+      <wsu:Timestamp wsu:Id="Timestamp">
+        <wsu:Created>2026-07-02T11:48:15Z</wsu:Created>
+        <wsu:Expires>2026-07-02T11:53:15Z</wsu:Expires>
+      </wsu:Timestamp>
+      <Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
+        <SignedInfo>
+          <CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+          <SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+          <Reference URI="#RST0">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>x1dexvML1H2TSmybLErItf/TxHV7Bw/h2oLBn0bfBSM=</DigestValue>
+          </Reference>
+          <Reference URI="#PPAuthInfo">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>Q+etNp7yuAByU/vy+fdsu+Tj2vbUScxmyBLcPC8iJXc=</DigestValue>
+          </Reference>
+          <Reference URI="#Timestamp">
+            <Transforms>
+              <Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+            </Transforms>
+            <DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <DigestValue>hchJHhS54EOV76sr/ffYEKeDg3ifb0iTJKXNKx8HQdQ=</DigestValue>
+          </Reference>
+        </SignedInfo>
+        <SignatureValue>eAhHPdA6cyCHx4bi1YGK6ROhUF0/jLcTyQrESzpFrdcA2qwxYFIEdymAtjWHMFIygeH/snvJYsSGedflonIV+ybwJTKNrdKljuUrQP0uwJ/D335yTa/agBp1746GjGl3pELO0nHilet8BwAtfWGsNtc61PGZ/nb6pgd8ig0849Xzw1Ex11Z0rlL7UGfH2rsm09zupFAi7pq8yQiRb8dnUNI3rAJ7CqbIkxu/nqvO0jkIEOVWl1abZ9hIYx/t/6VKQ1y7agj3Op3taT8FbCQX3y1fSkAeY9RcDltIUJDFOSACaFN0rAc3ngpXc4WP8js4qz/+6STJm0f9IVdc3IesGA==</SignatureValue>
+      </Signature>
+    </wsse:Security>
+  </s:Header>
+  <s:Body>
+    <wst:RequestSecurityToken Id="RST0">
+      <wst:RequestType>http://schemas.xmlsoap.org/ws/2005/02/trust/Issue</wst:RequestType>
+      <wsp:AppliesTo>
+        <wsa:EndpointReference>
+          <wsa:Address>http://Passport.NET/tb</wsa:Address>
+        </wsa:EndpointReference>
+      </wsp:AppliesTo>
+    </wst:RequestSecurityToken>
+  </s:Body>
+</s:Envelope>

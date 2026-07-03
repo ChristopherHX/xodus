@@ -1,0 +1,117 @@
+{
+  "startedDateTime": "2026-07-02T13:48:19.2677371+02:00",
+  "time": 516,
+  "serverIPAddress": "20.190.160.67",
+  "connection": "ClientPort:58839;EgressPort:58840",
+  "request": {
+    "method": "POST",
+    "url": "https://login.live.com/RST2.srf",
+    "httpVersion": "HTTP/1.0",
+    "headers": [
+      {
+        "name": "Connection",
+        "value": "Keep-Alive"
+      },
+      {
+        "name": "Content-Type",
+        "value": "application/soap+xml"
+      },
+      {
+        "name": "Accept",
+        "value": "*/*"
+      },
+      {
+        "name": "User-Agent",
+        "value": "MSAWindows/45 (OS 10.0.22621.0.0 ni_release; IDK 10.0.22621.1 ni_release_svc_prod3; Cfg 16.000.29325.00; Test 0)"
+      },
+      {
+        "name": "Content-Length",
+        "value": "4788"
+      },
+      {
+        "name": "Host",
+        "value": "login.live.com"
+      }
+    ],
+    "queryString": [],
+    "cookies": [],
+    "postData": {
+      "mimeType": "application/soap+xml"
+    }
+  },
+  "response": {
+    "status": 200,
+    "statusText": "OK",
+    "httpVersion": "HTTP/1.1",
+    "headers": [
+      {
+        "name": "Cache-Control",
+        "value": "no-store, no-cache"
+      },
+      {
+        "name": "Pragma",
+        "value": "no-cache"
+      },
+      {
+        "name": "Content-Type",
+        "value": "application/soap+xml; charset=utf-8"
+      },
+      {
+        "name": "Expires",
+        "value": "Thu, 02 Jul 2026 11:47:18 GMT"
+      },
+      {
+        "name": "P3P",
+        "value": "CP=\"DSP CUR OTPi IND OTRi ONL FIN\""
+      },
+      {
+        "name": "Referrer-Policy",
+        "value": "strict-origin-when-cross-origin"
+      },
+      {
+        "name": "x-ms-route-info",
+        "value": "C561_BAY"
+      },
+      {
+        "name": "x-ms-request-id",
+        "value": "39e9ffb1-1e35-42de-9033-06f4eaadf60a"
+      },
+      {
+        "name": "PPServer",
+        "value": "PPV: 30 H: PH1PEPF00011F5C V: 0"
+      },
+      {
+        "name": "X-Content-Type-Options",
+        "value": "nosniff"
+      },
+      {
+        "name": "Strict-Transport-Security",
+        "value": "max-age=31536000"
+      },
+      {
+        "name": "X-XSS-Protection",
+        "value": "1; mode=block"
+      },
+      {
+        "name": "Date",
+        "value": "Thu, 02 Jul 2026 11:48:17 GMT"
+      },
+      {
+        "name": "Connection",
+        "value": "keep-alive"
+      },
+      {
+        "name": "Content-Length",
+        "value": "11399"
+      }
+    ],
+    "cookies": [],
+    "redirectURL": "",
+    "content": {
+      "compression": 0,
+      "encoding": "base64",
+      "size": 11399,
+      "mimeType": "application/soap+xml; charset=utf-8"
+    }
+  }
+}

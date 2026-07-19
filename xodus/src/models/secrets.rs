@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::models::soap::{self, Timestamp};
+use crate::models::soap::{self, EncryptedKey, Timestamp};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Device {
@@ -18,6 +18,7 @@ pub struct LegacyToken {
     pub key_name: Option<String>,
     pub token: String,
     pub binary_secret: Option<String>,
+    // pub encrypted_key: Option<EncryptedKey>,
     pub lifetime: Timestamp,
 }
 
@@ -35,10 +36,20 @@ impl From<soap::RequestSecurityTokenResponse> for Token {
                 let encrypted_data = value.requested_security_token.encrypted_data.unwrap();
                 let key_name = encrypted_data.key_info.key_name.clone();
                 let token = quick_xml::se::to_string(&encrypted_data).unwrap();
+                let mut binary_secret = None;
+                // let mut encrypted_key = None;
+                // if let Some((bs, es)) = value.requested_proof_token.map(|t| (t.binary_secret, t.encrypted_key)) {
+                //     binary_secret = Some(bs);
+                //     encrypted_key = Some(es);
+                // }
+                if let Some((bs)) = value.requested_proof_token.map(|t| (t.binary_secret)) {
+                    binary_secret = Some(bs);
+                }
                 Self::Legacy(LegacyToken {
                     key_name,
                     token,
-                    binary_secret: value.requested_proof_token.map(|t| t.binary_secret),
+                    binary_secret: binary_secret,
+                    // encrypted_key: encrypted_key,
                     lifetime: value.lifetime,
                 })
             }

@@ -67,10 +67,33 @@ pub struct BinarySecurityTokenReq {
     pub value: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EncryptedKey {
+    #[serde(rename = "EncryptionMethod")]
+    pub encryption_method: EncryptionMethod,
+
+    #[serde(rename = "CipherData")]
+    pub cipher_data: CipherData,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EncryptionMethod {
+    #[serde(rename = "@Algorithm")]
+    pub algorithm: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CipherData {
+    #[serde(rename = "CipherValue")]
+    pub cipher_value: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestedProofToken {
     #[serde(rename = "wst:BinarySecret", alias = "BinarySecret")]
     pub binary_secret: String,
+    // #[serde(rename = "EncryptedKey", alias = "EncryptedKey")]
+    // pub encrypted_key: EncryptedKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

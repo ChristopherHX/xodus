@@ -1,14 +1,22 @@
+use std::mem::transmute_copy;
+
 use base64::prelude::*;
 use bergshamra::{DsigContext, Key, KeyData, KeyUsage, KeysManager};
+use rsa::Oaep;
 use rsa::rand_core::{OsRng, RngCore};
+use sha1::Sha1;
+use zerocopy::{FromBytes, IntoBytes, transmute};
 
+use crate::licensing::splicense::{ClepHmacState, HmacBinarySecret};
 use crate::models::devicecredential::{DeviceAddRequest, DeviceAddResponse};
 use crate::models::live::ExchangeUserTokenOutcome;
+use crate::models::secrets::{LegacyToken, Token};
 use crate::models::soap::{
     self, AlgorithmNode, AppliesTo, BinarySecurityTokenReq, DerivedKeyToken, EncryptedData,
     EndpointReference, ReferenceUri, RequestMultipleSecurityTokens, SecurityTokenReference,
     SignatureReference, SignatureTransforms, SignedInfo, UsernameToken,
 };
+use crate::tokens::device::provision_device_offline;
 
 mod utils;
 
@@ -139,6 +147,8 @@ pub async fn authenticate_device(
         .await?;
 
     let text = response.text().await?;
+
+    println!("{}", text);
     let res_envelope: soap::Envelope = quick_xml::de::from_str(&text).expect("Failed to de xml");
 
     Ok(res_envelope)
@@ -298,6 +308,7 @@ pub async fn exchange_device_token(
     let result = bergshamra::verify(&ctx, &text).unwrap();
     match result {
         bergshamra::VerifyResult::Invalid { reason } => {
+            println!("DEVICE {}", text);
             println!("DEVICE {}", reason);
         }
         bergshamra::VerifyResult::Valid { .. } => {
@@ -525,4 +536,71 @@ pub async fn exchange_user_token(
         soap::BodyContent::Fault(_) => Ok(ExchangeUserTokenOutcome::Fault(pp)),
         body => Ok(ExchangeUserTokenOutcome::Issued(body)),
     }
+}
+
+#[derive(FromBytes,IntoBytes)]
+#[repr(C)]
+struct BCRYPT_KEY_DATA_BLOB_HEADER {
+dwMagic: u32,
+dwVersion : u32,
+cbKeyData: u32
+}
+
+
+#[tokio::test]
+async fn test() {
+    let client = reqwest::Client::new();
+    let (dev, sec, pk2) = provision_device_offline(&client).await;
+
+    let token: Token = sec.into();
+    let Token::Legacy(token) = token else {
+        todo!("no a LegacyToken");
+    };
+
+    let proof_token = &token.binary_secret.unwrap();
+
+    // let Some(enc_key) = token.encrypted_key else {
+    //     panic!("enc_key missing");
+    // };
+    // println!("enc_key.cipher_data {}", enc_key.cipher_data.cipher_value);
+
+    // let res = pk2.decrypt(Oaep::new::<sha1::Sha1>(), &base64::engine::general_purpose::STANDARD.decode(enc_key.cipher_data.cipher_value).unwrap()).unwrap();
+
+    let mut data: [u8; 4096] = [0u8; 4096];
+
+    data.copy_from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(proof_token)
+            .unwrap()[..4096],
+    );
+
+    println!("{}", String::from_utf8_lossy(&data));
+
+    let hmac: ClepHmacState = transmute!(data);
+
+    let hsec = hmac.get_hmac_state();
+
+    let mut header = [0u8; 12];
+    header.copy_from_slice(&hsec.as_slice()[..12]);
+    let header : BCRYPT_KEY_DATA_BLOB_HEADER  = transmute!(header);
+
+    let b64 = BASE64_STANDARD.encode(&hsec.as_slice()[12..12+32]);
+
+    println!("{}", b64);
+    println!("{}", String::from_utf8_lossy(&hsec.as_slice()));
+    println!("{}", hex::encode(&hsec.as_slice()));
+
+    println!("keylen {}", header.cbKeyData);
+    println!("keylen {:x}", header.cbKeyData);
+
+    let resp = exchange_device_token(
+        &client,
+        token.token,
+        b64,
+        "{d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_string(),
+        "www.microsoft.com".to_owned(),
+        Some(soap::PolicyReference::mbi_ssl()),
+    )
+    .await
+    .unwrap();
 }

@@ -546,7 +546,6 @@ dwVersion : u32,
 cbKeyData: u32
 }
 
-
 #[tokio::test]
 async fn test() {
     let client = reqwest::Client::new();
@@ -597,10 +596,20 @@ async fn test() {
         &client,
         token.token,
         b64,
-        "{d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_string(),
-        "www.microsoft.com".to_owned(),
-        Some(soap::PolicyReference::mbi_ssl()),
+        "{28C08266-F973-4AE6-FFE4-409B249F138F}".to_string(),
+        "scope=service::user.auth.xboxlive.com::MBI_SSL&api-version=2.0".to_owned(),
+        Some(soap::PolicyReference::token_broker()),
     )
     .await
     .unwrap();
+
+
+    let ms_device_token: Token = resp.into();
+    let Token::Compact(ms_device_token) = ms_device_token else {
+        // return Err("Unsupported token".to_string());
+        todo!("Unsupported token");
+    };
+
+    println!("{}", ms_device_token);
+
 }

@@ -558,12 +558,14 @@ async fn test() {
 
     let proof_token = &token.binary_secret.unwrap();
 
-    // let Some(enc_key) = token.encrypted_key else {
-    //     panic!("enc_key missing");
-    // };
-    // println!("enc_key.cipher_data {}", enc_key.cipher_data.cipher_value);
+    let Some(enc_key) = token.encrypted_key else {
+        panic!("enc_key missing");
+    };
+    println!("enc_key.cipher_data {}", enc_key.cipher_data.cipher_value);
 
-    // let res = pk2.decrypt(Oaep::new::<sha1::Sha1>(), &base64::engine::general_purpose::STANDARD.decode(enc_key.cipher_data.cipher_value).unwrap()).unwrap();
+    let b63 = base64::engine::general_purpose::STANDARD.decode(enc_key.cipher_data.cipher_value).unwrap();
+    println!("b63len {}", b63.len());
+    let res = pk2.decrypt(Oaep::new::<sha1::Sha1>(), &b63).unwrap();
 
     let mut data: [u8; 4096] = [0u8; 4096];
 

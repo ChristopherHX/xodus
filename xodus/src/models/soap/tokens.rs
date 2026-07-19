@@ -92,8 +92,8 @@ pub struct CipherData {
 pub struct RequestedProofToken {
     #[serde(rename = "wst:BinarySecret", alias = "BinarySecret")]
     pub binary_secret: String,
-    // #[serde(rename = "EncryptedKey", alias = "EncryptedKey")]
-    // pub encrypted_key: EncryptedKey,
+    #[serde(rename = "EncryptedKey", alias = "EncryptedKey")]
+    pub encrypted_key: EncryptedKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

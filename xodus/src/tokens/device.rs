@@ -99,16 +99,16 @@ pub async fn provision_device_offline(
         device_info: Some(DeviceInfo {
             id: "DeviceInfo".to_string(),
             components: hardware::probe_provision_components(),
-            // tpm_info: Some(TpmInfo {
-            //     key_value: TpmKeyValue {
-            //         rsa_key_value: RsaKeyValue {
-            //             modulus: BASE64_STANDARD.encode(public_key.n().to_bytes_le()),
-            //             exponent: BASE64_STANDARD.encode(public_key.e().to_bytes_le()),
-            //         },
-            //         storage_key_blob: None,
-            //     },
-            // }),
-            tpm_info: None,
+            tpm_info: Some(TpmInfo {
+                key_value: TpmKeyValue {
+                    rsa_key_value: RsaKeyValue {
+                        modulus: BASE64_STANDARD.encode(public_key.n().to_bytes_le()),
+                        exponent: BASE64_STANDARD.encode(public_key.e().to_bytes_le()),
+                    },
+                    storage_key_blob: None,
+                },
+            }),
+            // tpm_info: None,
         }),
     };
 

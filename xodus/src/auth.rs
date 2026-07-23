@@ -1,17 +1,22 @@
-use reqwest::{Client};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use xal::{
-    AuthPromptCallback, Constants, DeviceType, Flows, TokenStore, XalAppParameters, XalAuthenticator, client_params::CLIENT_WINDOWS, extensions::{CorrelationVectorReqwestBuilder, JsonExDeserializeMiddleware, SigningReqwestBuilder}, oauth2::{
+    AuthPromptCallback, Constants, DeviceType, Flows, TokenStore, XalAppParameters,
+    XalAuthenticator,
+    client_params::CLIENT_WINDOWS,
+    extensions::{
+        CorrelationVectorReqwestBuilder, JsonExDeserializeMiddleware, SigningReqwestBuilder,
+    },
+    oauth2::{
         EmptyExtraTokenFields, RedirectUrl, Scope, StandardTokenResponse, basic::BasicTokenType,
-    }, response::{
+    },
+    response::{
         XADDisplayClaims, XATDisplayClaims, XAUDisplayClaims, XSTSDisplayClaims, XTokenResponse,
     },
 };
 
 use crate::{
-    models::{
-        live::ExchangeUserTokenOutcome, secrets::Token, soap,
-    },
+    models::{live::ExchangeUserTokenOutcome, secrets::Token, soap},
     tokens::TokenManager,
 };
 

@@ -1,12 +1,9 @@
 use reqwest::{Client, Request};
+use serde::{Deserialize, Serialize};
 use xal::{
-    AuthPromptCallback, Constants, DeviceType, Flows, TokenStore, XalAppParameters,
-    XalAuthenticator,
-    client_params::CLIENT_WINDOWS,
-    oauth2::{
+    AuthPromptCallback, Constants, DeviceType, Flows, TokenStore, XalAppParameters, XalAuthenticator, client_params::CLIENT_WINDOWS, extensions::{CorrelationVectorReqwestBuilder, JsonExDeserializeMiddleware, SigningReqwestBuilder}, oauth2::{
         EmptyExtraTokenFields, RedirectUrl, Scope, StandardTokenResponse, basic::BasicTokenType,
-    },
-    response::{
+    }, response::{
         XADDisplayClaims, XATDisplayClaims, XAUDisplayClaims, XSTSDisplayClaims, XTokenResponse,
     },
 };
@@ -190,6 +187,30 @@ pub async fn do_sisu(
     Ok((auth, resp))
 }
 
+#[derive(Serialize)]
+struct UserProfileBatch<'t> {
+    userIds: &'t [&'t str],
+    settings: &'t [&'t str],
+}
+
+#[derive(Debug, Deserialize)]
+struct UserProfileSettings {
+    id: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserProfileEntry {
+    id: String,
+    hostId: String,
+    settings: Vec<UserProfileSettings>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserProfileBatchResponse {
+    profileUsers: Vec<UserProfileEntry>,
+}
+
 #[ignore]
 #[tokio::test]
 async fn test_minecraft_win_auth() {
@@ -197,11 +218,67 @@ async fn test_minecraft_win_auth() {
     crate::secrets::init_secrets().expect("Unable to initialize credentials");
     let tokens = TokenManager::with_keychain_and_memory();
 
-    let (_, resp) = do_sisu(&client, &tokens, "0000000040159362", 896928775)
+    let (a, resp) = do_sisu(&client, &tokens, "0000000040159362", 896928775)
         .await
         .expect("ok");
 
     println!("title {}", resp.title_token.token);
     println!("user {}", resp.user_token.token);
     println!("webpage {}", resp.web_page);
+
+    println!("{:?}", resp.authorization_token.display_claims);
+
+    let gtg = resp
+        .authorization_token
+        .display_claims
+        .as_ref()
+        .map(|d| d.xui[0]["gtg"].clone())
+        .unwrap();
+    let agg = resp
+        .authorization_token
+        .display_claims
+        .as_ref()
+        .map(|d| d.xui[0]["agg"].clone())
+        .unwrap();
+    let xid = resp
+        .authorization_token
+        .display_claims
+        .as_ref()
+        .map(|d| d.xui[0]["xid"].clone())
+        .unwrap();
+
+    println!("{gtg}, {agg}, {xid}");
+
+    let r = client
+        .post("https://profile.xboxlive.com/users/batch/profile/settings")
+        .header("x-xbl-contract-version", "2")
+        .header(
+            "Authorization",
+            resp.authorization_token.authorization_header_value(),
+        )
+        .json(&UserProfileBatch {
+            userIds: &[&xid],
+            settings: &[
+                "AppDisplayName",
+                "AppDisplayPicRaw",
+                "GameDisplayName",
+                "GameDisplayPicRaw",
+                "Gamerscore",
+                "Gamertag",
+                "ModernGamertag",
+                "ModernGamertagSuffix",
+                "UniqueModernGamertag",
+            ],
+        })
+        .sign(&mut a.request_signer(), None)
+        .await
+        .unwrap()
+        .send()
+        .await
+        .unwrap()
+        .json_ex::<UserProfileBatchResponse>()
+        .await
+        .unwrap();
+
+    println!("{:?}", r);
 }

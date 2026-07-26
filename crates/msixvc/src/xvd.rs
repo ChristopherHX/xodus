@@ -2,13 +2,11 @@ use aes::Aes128;
 use aes::cipher::KeyInit;
 use bytes::Bytes;
 use futures_util::StreamExt;
-use ntfs::{Ntfs, NtfsFile, NtfsReadSeek};
 use reqwest::header::RANGE;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::task::block_in_place;
 use tokio::time::{sleep, timeout};
@@ -21,11 +19,12 @@ use zerocopy::IntoBytes;
 
 use crate::models::xvd::{
     PAGE_SIZE, PAGES_PER_BLOCK, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment,
-    XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    XvdSegmentMetadataSegmentFlags, XvdUserDataHeader, XvdUserDataPackageFileEntry,
+    XvdUserDataPackageFilesHeader,
 };
 use crate::streaming_ntfs::collect_ntfs_stream_layouts;
 
-use crate::crypt::{SectionReader, Tweak, decrypt_page_xts};
+use crate::crypt::{Tweak, decrypt_page_xts};
 use crate::math::{
     bytes_to_pages, calculate_hash_block_num_and_run_for_block_num, offset_to_page_number,
 };
@@ -161,7 +160,6 @@ impl<R: Write + Seek> Write for SyncSubstream<R> {
 }
 
 struct XvdEncryptionInfo {
-    full_key: [u8; 32],
     encrypted_sections: Vec<EncryptedSectionInfo>,
 }
 
@@ -223,34 +221,6 @@ impl<R: Read + Seek> Read for XvdStream<R> {
             .map_err(|_| Error::new(ErrorKind::InvalidData, "remaining range too large"))?;
         let to_read = remaining.min(buf.len());
 
-        if let Some(encryption_info) = &self.encryption_info {
-            for s in &encryption_info.encrypted_sections {
-                if self.offset + current >= s.section_offset
-                    && self.offset + current < s.section_offset + s.section_length
-                {
-                    if s.section_offset + s.section_length < self.offset + current + to_read as u64
-                    {
-                        todo!("Reading outside of the encrypted section in one go is Unsupported");
-                    }
-                    let mut reader = SectionReader::new(
-                        &mut self.inner,
-                        s.section_offset,
-                        s.section_length,
-                        s.header_id,
-                        s.vduid,
-                        encryption_info.full_key,
-                        s.data_units.as_deref(),
-                    );
-                    return reader
-                        .read_at(
-                            self.offset + current - s.section_offset,
-                            &mut buf[..to_read],
-                        )
-                        .map(|_| to_read);
-                }
-            }
-        }
-
         self.inner.read(&mut buf[..to_read])
     }
 }
@@ -304,69 +274,6 @@ impl<R> Write for XvdStream<R> {
         Ok(())
     }
 }
-
-fn extract_ntfs_file<T: Read + Seek>(
-    fs: &mut T,
-    file: &NtfsFile<'_>,
-    output_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut output_file = std::fs::File::create(output_path)?;
-
-    if let Some(data_item) = file.data(fs, "") {
-        let data_item = data_item?;
-        let data_attribute = data_item.to_attribute()?;
-        let mut data_value = data_attribute.value(fs)?;
-        let mut buf = [0u8; 8192];
-
-        loop {
-            let bytes_read = data_value.read(fs, &mut buf)?;
-            if bytes_read == 0 {
-                break;
-            }
-
-            output_file.write_all(&buf[..bytes_read])?;
-        }
-    }
-
-    Ok(())
-}
-
-fn extract_ntfs_directory<T: Read + Seek>(
-    ntfs: &Ntfs,
-    fs: &mut T,
-    directory: &NtfsFile<'_>,
-    output_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(output_dir)?;
-
-    let index = directory.directory_index(fs)?;
-    let mut entries = index.entries();
-
-    while let Some(entry) = entries.next(fs) {
-        let entry = entry?;
-        let Some(file_name) = entry.key() else {
-            continue;
-        };
-        let file_name = file_name?;
-        let name = file_name.name().to_string()?;
-
-        if name == "." || name.starts_with('$') {
-            continue;
-        }
-
-        let child = entry.to_file(ntfs, fs)?;
-        let child_output_path = output_dir.join(&name);
-
-        if file_name.is_directory() {
-            extract_ntfs_directory(ntfs, fs, &child, &child_output_path)?;
-        } else {
-            extract_ntfs_file(fs, &child, &child_output_path)?;
-        }
-    }
-
-    Ok(())
-}
-
 pub struct XvdFile {
     header: XvdHeader,
     drive_data_offset: u64,
@@ -398,6 +305,7 @@ pub struct SegmentFile {
     pub offset: u64,
     pub length: u64,
     pub data_hashs: Vec<[u8; 20]>,
+    pub keep_encrypted: bool,
 }
 
 impl XvdFile {
@@ -640,6 +548,9 @@ impl XvdFile {
                         offset: page_offset * PAGE_SIZE as u64,
                         length: segment.filesize,
                         data_hashs,
+                        keep_encrypted: segment
+                            .flags
+                            .contains(XvdSegmentMetadataSegmentFlags::KEEP_ENCRYPTED_ON_DISK),
                     },
                 );
                 page_offset += page_length;
@@ -716,6 +627,7 @@ impl XvdFile {
     pub async fn parse_ntfs_segment_metadata<Reader>(
         &self,
         file: Reader,
+        only_plain: bool,
     ) -> Result<HashMap<String, SegmentFile>, Box<dyn std::error::Error>>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
@@ -791,12 +703,18 @@ impl XvdFile {
                     continue;
                 };
 
+                if only_plain && partition_offset + start >= drive_data_offset + drive_plain_len {
+                    continue;
+                }
+
                 files.insert(
                     report.path.replace("/", "\\"),
                     SegmentFile {
                         offset: partition_offset + start,
                         length: report.value_length,
                         data_hashs: vec![],
+                        keep_encrypted: !only_plain
+                            && report.path.to_ascii_lowercase().ends_with(".exe"),
                     },
                 );
             }
@@ -810,7 +728,7 @@ impl XvdFile {
     pub async fn download_file_http<Writer, Progress>(
         &self,
         client: &reqwest::Client,
-        url: String,
+        url: &str,
         out: &mut Writer,
         sfile: &SegmentFile,
         full_key: [u8; 32],
@@ -834,7 +752,9 @@ impl XvdFile {
 
         let file_offset_in_section;
 
-        if let Some(s) = s {
+        if let Some(s) = s
+            && !sfile.keep_encrypted
+        {
             let mut tweak_key = [0u8; 16];
             let mut data_key = [0u8; 16];
             tweak_key.copy_from_slice(&full_key[..16]);
@@ -863,7 +783,7 @@ impl XvdFile {
         if let Ok(Ok(Ok(response))) = timeout(
             stall_timeout,
             client
-                .get(url.clone())
+                .get(url)
                 .header(
                     RANGE,
                     format!(
@@ -897,7 +817,7 @@ impl XvdFile {
                 if let Ok(Ok(Ok(response))) = timeout(
                     stall_timeout,
                     client
-                        .get(url.clone())
+                        .get(url)
                         .header(
                             RANGE,
                             format!(
@@ -929,7 +849,8 @@ impl XvdFile {
                 }
                 let chunk = pending.split_to(4096);
                 page.copy_from_slice(&chunk);
-                if let Some(tweak) = tweak.as_mut() {
+                let to_write_remaining = remaining.min(PAGE_SIZE as u64) as usize;
+                let to_write = if let Some(tweak) = tweak.as_mut() {
                     tweak.update_data_unit(match &s.unwrap().data_units {
                         Some(units) => *units.get(page_in_section as usize).ok_or_else(|| {
                             io::Error::new(
@@ -952,14 +873,19 @@ impl XvdFile {
                         tweak_cipher.as_ref().unwrap(),
                         data_cipher.as_ref().unwrap(),
                     );
-                }
-                let to_write = remaining.min(PAGE_SIZE as u64) as usize;
+                    to_write_remaining
+                } else if sfile.keep_encrypted {
+                    // Decryption needs full 4k blocks
+                    PAGE_SIZE
+                } else {
+                    to_write_remaining
+                };
                 while let Err(err) = out.write_all(&page[..to_write]).await {
                     eprintln!("Error write file {} waiting 30s", err);
                     println!("Error write file {} waiting 30s", err);
                     sleep(tokio::time::Duration::from_secs(30)).await;
                 }
-                remaining -= to_write as u64;
+                remaining -= to_write_remaining as u64;
 
                 page_in_section += 1;
             }
@@ -972,67 +898,143 @@ impl XvdFile {
         }
         Ok(())
     }
-}
 
-pub fn unpack_file(
-    xvd: XvdFile,
-    path: String,
-    destination: String,
-    full_key: [u8; 32],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let sfile = std::fs::File::open(path)?;
-    let block_size = 4096; //xvd.header.block_size;
-    let gp = gpt::GptConfig::new()
-        .writable(false)
-        .logical_block_size(if block_size == 512 {
-            gpt::disk::LogicalBlockSize::Lb512
-        } else if block_size == 4096 {
-            gpt::disk::LogicalBlockSize::Lb4096
+    async fn extract_file_ex<Writer, Reader, Progress>(
+        &self,
+        i: &mut Reader,
+        out: &mut Writer,
+        sfile: &SegmentFile,
+        full_key: [u8; 32],
+        mut progress: Progress,
+        decrypt_all: bool,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        Reader: AsyncRead + Unpin,
+        Writer: AsyncWrite + Unpin,
+        Progress: FnMut(u64, u64),
+    {
+        if sfile.length == 0 {
+            return Ok(());
+        }
+
+        let s = &self.encrypted_section_infos.iter().find(|s| {
+            sfile.offset >= s.section_offset && sfile.offset < s.section_offset + s.section_length
+        });
+
+        let mut tweak = None;
+        let mut tweak_cipher = None;
+        let mut data_cipher = None;
+
+        let file_offset_in_section;
+
+        if let Some(s) = s
+            && (!sfile.keep_encrypted || decrypt_all)
+        {
+            let mut tweak_key = [0u8; 16];
+            let mut data_key = [0u8; 16];
+            tweak_key.copy_from_slice(&full_key[..16]);
+            data_key.copy_from_slice(&full_key[16..]);
+
+            tweak = Some(Tweak::new(0, s.header_id, s.vduid));
+            tweak_cipher = Some(Aes128::new((&tweak_key).into()));
+            data_cipher = Some(Aes128::new((&data_key).into()));
+            file_offset_in_section = sfile.offset - s.section_offset;
         } else {
-            todo!("unsupported block_size: {}", block_size)
-        })
-        .open_from_device(XvdStream {
-            inner: sfile.try_clone().unwrap(),
-            offset: xvd.drive_data_offset,
-            end_offset: xvd.drive_data_offset + xvd.header.drive_size,
-            encryption_info: None,
-        })
-        .unwrap();
-
-    let mut ntfs_partition = None;
-    for (index, part) in gp.partitions() {
-        if !part.is_used() {
-            continue;
+            // TODO for data integrity we need a section for unencrypted sections...
+            file_offset_in_section = sfile.offset;
         }
+        let page_start = file_offset_in_section / PAGE_SIZE as u64;
+        let page_count = sfile.length.div_ceil(PAGE_SIZE as u64);
 
-        let part_start = part.bytes_start(*gp.logical_block_size()).unwrap();
-        let part_len = part.bytes_len(*gp.logical_block_size()).unwrap();
+        let mut page = [0u8; PAGE_SIZE];
 
-        if ntfs_partition.is_none() {
-            ntfs_partition = Some((index, part.name.clone(), part_start, part_len));
+        for page_in_section in page_start..page_start + page_count {
+            progress(
+                min((page_in_section - page_start) * 4096, sfile.length),
+                sfile.length,
+            );
+            i.read_exact(&mut page).await?;
+            let to_write = min(
+                PAGE_SIZE,
+                sfile.length as usize
+                    - min(
+                        (page_in_section - page_start) as usize * 4096 as usize,
+                        sfile.length as usize,
+                    ),
+            ) as usize;
+            let to_write = if let Some(tweak) = tweak.as_mut() {
+                tweak.update_data_unit(match &s.unwrap().data_units {
+                    Some(units) => *units.get(page_in_section as usize).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "{} units {} page_in_section {} ({}+{})",
+                                "missing data unit",
+                                (*units).len(),
+                                page_in_section,
+                                page_start,
+                                page_count
+                            ),
+                        )
+                    })?,
+                    None => page_in_section as u32,
+                });
+                decrypt_page_xts(
+                    &mut page,
+                    *tweak,
+                    tweak_cipher.as_ref().unwrap(),
+                    data_cipher.as_ref().unwrap(),
+                );
+                to_write
+            } else if sfile.keep_encrypted {
+                // Decryption needs full 4k blocks
+                PAGE_SIZE
+            } else {
+                to_write
+            };
+            while let Err(err) = out.write_all(&page[..to_write]).await {
+                eprintln!("Error write file {} waiting 30s", err);
+                println!("Error write file {} waiting 30s", err);
+                sleep(tokio::time::Duration::from_secs(30)).await;
+            }
         }
+        Ok(())
     }
 
-    let (_, _, part_start, part_len) = ntfs_partition.expect("no used GPT partition found");
-    let partition_offset = xvd.drive_data_offset + part_start;
+    // Reader is an full xvd file
+    pub async fn extract_file<Writer, Reader, Progress>(
+        &self,
+        i: &mut Reader,
+        out: &mut Writer,
+        sfile: &SegmentFile,
+        full_key: [u8; 32],
+        progress: Progress,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        Reader: AsyncRead + AsyncSeek + Unpin,
+        Writer: AsyncWrite + Unpin,
+        Progress: FnMut(u64, u64),
+    {
+        i.seek(std::io::SeekFrom::Start(sfile.offset)).await?;
+        self.extract_file_ex(i, out, sfile, full_key, progress, false)
+            .await
+    }
 
-    let mut fs = XvdStream {
-        inner: sfile.try_clone().unwrap(),
-        offset: partition_offset,
-        end_offset: partition_offset + part_len,
-        encryption_info: Some(XvdEncryptionInfo {
-            full_key,
-            encrypted_sections: xvd.encrypted_section_infos,
-        }),
-    };
-    fs.seek(SeekFrom::Start(0)).unwrap();
-    let mut ntfs = Ntfs::new(&mut fs).unwrap();
-
-    ntfs.read_upcase_table(&mut fs).unwrap();
-
-    let root = ntfs.root_directory(&mut fs).unwrap();
-    let extract_root = PathBuf::from(destination);
-    println!("extracting data directory to {}", extract_root.display());
-    extract_ntfs_directory(&ntfs, &mut fs, &root, &extract_root)?;
-    Ok(())
+    // Reader points to file content
+    pub async fn mount_mem_fd<Writer, Reader, Progress>(
+        &self,
+        i: &mut Reader,
+        out: &mut Writer,
+        sfile: &SegmentFile,
+        full_key: [u8; 32],
+        progress: Progress,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        Reader: AsyncRead + Unpin,
+        Writer: AsyncWrite + Unpin,
+        Progress: FnMut(u64, u64),
+    {
+        self.extract_file_ex(i, out, sfile, full_key, progress, true)
+            .await
+    }
 }

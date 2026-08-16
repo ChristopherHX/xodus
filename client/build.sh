@@ -1,0 +1,1 @@
+winegcc --target x86_64-windows-msvc main.c xodus_utils.c

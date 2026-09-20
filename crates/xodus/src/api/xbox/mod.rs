@@ -246,54 +246,85 @@ pub async fn fetch_atom(
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct Account {
+pub struct Account {
     #[serde(rename = "@msa")]
-    msa: String,
+    pub msa: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct Title {
+pub struct Title {
     #[serde(rename = "@scid")]
-    scid: String,
+    pub scid: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
-struct ContextDescription {
-    account: Account,
-    title: Title,
+pub struct ContextDescription {
+    pub account: Account,
+    pub title: Title,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
-struct Blob {
+pub struct Blob {
     #[serde(rename = "@name")]
-    name: String,
+    pub name: String,
     #[serde(rename = "$text")]
-    data: String,
+    pub data: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
-struct Container {
+pub struct Container {
     #[serde(rename = "@name")]
-    name: String,
+    pub name: String,
     #[serde(rename = "@displayName")]
-    display_name: String,
-    blobs: Vec<Blob>,
+    pub display_name: String,
+    pub blobs: Vec<Blob>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
-struct Data {
-    containers: Vec<Container>,
+pub struct Data {
+    pub containers: Vec<Container>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
-struct XbConnectedStorageSpace {
-    context_description: ContextDescription,
-    data: Data,
+pub struct XbConnectedStorageSpace {
+    pub context_description: ContextDescription,
+    pub data: Data,
+}
+
+pub async fn export_connected_storage_xml(client: &Client, tokens: &TokenManager, client_id: &str, title_id: i64, scid: Option<&str>) -> XbConnectedStorageSpace {
+    let scid = scid.map_or_else(|| uuid::Uuid::from_u64_pair(0, title_id as u64).to_string(), |v|v.to_owned());
+
+    let (mut a, resp, dt) = do_sisu(&client, &tokens, client_id, title_id)
+        .await
+        .expect("ok");
+
+    let xuid = &resp.authorization_token.display_claims.as_ref().unwrap().xui[0]["xid"];
+
+    let ut = a.get_xsts_token(Some(&dt), None, Some(&resp.user_token), "http://xboxlive.com").await.unwrap();
+
+    let mut out_containers = Vec::<Container>::new();
+    
+    let containers = fetch_containers(&client, &ut.authorization_header_value(), xuid, &scid).await.unwrap();
+    for e in &containers.blobs {
+        let mut blobs = Vec::<Blob>::new();
+        let cn = e.file_name.strip_suffix(",savedgame").unwrap();
+        let ci = fetch_container(&client, &ut.authorization_header_value(), xuid, &scid, cn).await.unwrap();
+        for a in &ci.atoms {
+            let ac = fetch_atom(&client, &ut.authorization_header_value(), xuid, &scid, &a.atom).await.unwrap();
+            blobs.push(Blob { name: a.name.to_owned(), data: base64::engine::general_purpose::STANDARD.encode(ac) });
+        }
+        out_containers.push(Container { name: cn.to_owned(), display_name: e.display_name.to_string(), blobs: blobs });
+    }
+
+    XbConnectedStorageSpace{
+        context_description: ContextDescription { account: Account { msa: "me".to_owned() }, title: Title { scid } },
+        data: Data { containers: out_containers },
+    }
 }
 
 #[ignore]

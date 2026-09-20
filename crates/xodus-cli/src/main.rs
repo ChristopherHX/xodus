@@ -89,6 +89,13 @@ enum SubCommand {
     SpLicense {
         block: String,
     },
+    #[command(about = "Download Connected Storage")]
+    ExportConnectedStorage {
+        msa_id: String,
+        title_id: i64,
+        out: String,
+        scid: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -241,6 +248,7 @@ async fn main() -> ExitCode {
             ClepAction::Decrypt { data } => commands::clep::decrypt(data),
         },
         SubCommand::SpLicense { block } => commands::splicense::run(block),
+        SubCommand::ExportConnectedStorage { msa_id, title_id, out, scid } => commands::export_connected_storage::run(&client, &tokens, msa_id, title_id, out, scid.as_deref()).await,
     };
 
     xodus::secrets::destroy_secrets();

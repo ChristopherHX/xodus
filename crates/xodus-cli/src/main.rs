@@ -93,6 +93,7 @@ enum SubCommand {
     ExportConnectedStorage {
         msa_id: String,
         title_id: i64,
+        pfn: String,
         out: String,
         scid: Option<String>,
     },
@@ -248,7 +249,7 @@ async fn main() -> ExitCode {
             ClepAction::Decrypt { data } => commands::clep::decrypt(data),
         },
         SubCommand::SpLicense { block } => commands::splicense::run(block),
-        SubCommand::ExportConnectedStorage { msa_id, title_id, out, scid } => commands::export_connected_storage::run(&client, &tokens, msa_id, title_id, out, scid.as_deref()).await,
+        SubCommand::ExportConnectedStorage { msa_id, title_id, pfn, out, scid } => commands::export_connected_storage::run(&client, &tokens, msa_id, title_id, &pfn, out, scid.as_deref()).await,
     };
 
     xodus::secrets::destroy_secrets();

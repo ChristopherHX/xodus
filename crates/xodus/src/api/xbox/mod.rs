@@ -129,6 +129,7 @@ pub async fn lock_container(
     token: &str,
     xuid: &str,
     scid: &str,
+    pfn: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let r = client
         .put(
@@ -137,7 +138,7 @@ pub async fn lock_container(
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
         // .header("Accept-Language", "en-US")// Required for no http 400
-        .header("x-xbl-pfn", "Microsoft.BadgerWin10_8wekyb3d8bbwe")
+        .header("x-xbl-pfn", pfn)
         .header("x-xbl-lock-ver", "1")
         .header("x-xbl-lock-ext", "300")
         .send()
@@ -153,6 +154,7 @@ pub async fn delete_container(
     token: &str,
     xuid: &str,
     scid: &str,
+    pfn: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let r = client
         .delete(
@@ -161,7 +163,7 @@ pub async fn delete_container(
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
         // .header("Accept-Language", "en-US")// Required for no http 400
-        .header("x-xbl-pfn", "Microsoft.BadgerWin10_8wekyb3d8bbwe")
+        .header("x-xbl-pfn", pfn)
         .header("x-xbl-lock-ver", "1")
         .header("x-xbl-lock-ext", "300")
         .send()
@@ -203,6 +205,7 @@ pub async fn fetch_container(
     xuid: &str,
     scid: &str,
     container_name: &str,
+    pfn: &str
 ) -> Result<Atoms, Box<dyn std::error::Error>> {
     let r = client
         .get(
@@ -211,7 +214,7 @@ pub async fn fetch_container(
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
         .header("Accept-Language", "en-US")// Required for no http 400
-        .header("x-xbl-pfn", "Microsoft.BadgerWin10_8wekyb3d8bbwe")
+        .header("x-xbl-pfn", pfn)
         .send()
         .await?
         .error_for_status()?;
@@ -227,6 +230,7 @@ pub async fn fetch_atom(
     xuid: &str,
     scid: &str,
     atom: &str,
+    pfn: &str,
 ) -> Result<bytes::Bytes, Box<dyn std::error::Error>> {
     let r = client
         .get(
@@ -235,7 +239,7 @@ pub async fn fetch_atom(
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
         .header("Accept-Language", "en-US")// Required for no http 400
-        .header("x-xbl-pfn", "Microsoft.BadgerWin10_8wekyb3d8bbwe")
+        .header("x-xbl-pfn", pfn)
         .send()
         .await?
         .error_for_status()?;
@@ -296,7 +300,7 @@ pub struct XbConnectedStorageSpace {
     pub data: Data,
 }
 
-pub async fn export_connected_storage_xml(client: &Client, tokens: &TokenManager, client_id: &str, title_id: i64, scid: Option<&str>) -> XbConnectedStorageSpace {
+pub async fn export_connected_storage_xml(client: &Client, tokens: &TokenManager, client_id: &str, title_id: i64, pfn: &str, scid: Option<&str>) -> XbConnectedStorageSpace {
     let scid = scid.map_or_else(|| uuid::Uuid::from_u64_pair(0, title_id as u64).to_string(), |v|v.to_owned());
 
     let (mut a, resp, dt) = do_sisu(&client, &tokens, client_id, title_id)
@@ -313,9 +317,9 @@ pub async fn export_connected_storage_xml(client: &Client, tokens: &TokenManager
     for e in &containers.blobs {
         let mut blobs = Vec::<Blob>::new();
         let cn = e.file_name.strip_suffix(",savedgame").unwrap();
-        let ci = fetch_container(&client, &ut.authorization_header_value(), xuid, &scid, cn).await.unwrap();
+        let ci = fetch_container(&client, &ut.authorization_header_value(), xuid, &scid, cn, pfn).await.unwrap();
         for a in &ci.atoms {
-            let ac = fetch_atom(&client, &ut.authorization_header_value(), xuid, &scid, &a.atom).await.unwrap();
+            let ac = fetch_atom(&client, &ut.authorization_header_value(), xuid, &scid, &a.atom, pfn).await.unwrap();
             blobs.push(Blob { name: a.name.to_owned(), data: base64::engine::general_purpose::STANDARD.encode(ac) });
         }
         out_containers.push(Container { name: cn.to_owned(), display_name: e.display_name.to_string(), blobs: blobs });
@@ -325,121 +329,4 @@ pub async fn export_connected_storage_xml(client: &Client, tokens: &TokenManager
         context_description: ContextDescription { account: Account { msa: "me".to_owned() }, title: Title { scid } },
         data: Data { containers: out_containers },
     }
-}
-
-#[ignore]
-#[tokio::test]
-async fn test_serialize() {
-    let mut writer = String::new();
-    let mut ser = quick_xml::se::Serializer::new(&mut writer);
-    ser.text_format(quick_xml::se::TextFormat::CData);
-    let data = XbConnectedStorageSpace{
-        context_description: ContextDescription { account: Account { msa: "me".to_owned() }, title: Title { scid: "000".to_owned() } },
-        data: Data { containers: vec![Container{blobs: vec![Blob{ name: "myblob".to_owned(), data: "binary Datac <xml></xml> --> ]]>".to_owned() }], display_name: "me".to_owned(), name: "es".to_owned()}] },
-    }.serialize(ser).unwrap();
-    // quick_xml::se::Serializer::text_format(&mut self, format)
-    println!("xs {writer}");
-}
-
-#[ignore]
-#[tokio::test]
-async fn test_title_access() {
-    // let filter = tracing_subscriber::EnvFilter::from_env("XODUS_LOG");
-    // let registry =
-    //     tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(filter));
-
-    // {
-    //     registry.init();
-    // }
-    let client = reqwest::Client::new();
-    crate::secrets::init_secrets().expect("Unable to initialize credentials");
-    let tokens = TokenManager::with_keychain_and_memory();
-
-    let (mut a, resp, dt) = do_sisu(&client, &tokens, "000000004C5D37D8", 0x61B215AE)
-        .await
-        .expect("ok");
-
-    println!("title {}", resp.title_token.token);
-    println!("user {}", resp.user_token.token);
-    println!("webpage {}", resp.web_page);
-
-    // println!("at");
-    // for (k, v) in &resp.authorization_token.display_claims.as_ref().unwrap().xui[0] {
-    //     println!("{k}: {v}");
-    // }
-
-    // println!("ut");
-    // for (k, v) in &resp.user_token.display_claims.as_ref().unwrap().xui[0] {
-    //     println!("{k}: {v}");
-    // }
-    let xuid = &resp.authorization_token.display_claims.as_ref().unwrap().xui[0]["xid"];
-
-    let ut = a.get_xsts_token(Some(&dt), None, Some(&resp.user_token), "http://xboxlive.com").await.unwrap();
-
-    let mut out_containers = Vec::<Container>::new();
-    
-    println!("R {}", lock_container(&client, &ut.authorization_header_value(), xuid, "00000000-0000-0000-0000-000061B215AE").await.unwrap());
-    let containers = fetch_containers(&client, &ut.authorization_header_value(), xuid, "00000000-0000-0000-0000-000061B215AE").await.unwrap();
-    println!("{:?}", &containers);
-    for e in &containers.blobs {
-        let mut blobs = Vec::<Blob>::new();
-        let cn = e.file_name.strip_suffix(",savedgame").unwrap();
-        // let out_container = out_containers.push_mut(Container { name: (), display_name: (), blobs: () });
-        let ci = fetch_container(&client, &ut.authorization_header_value(), xuid, "00000000-0000-0000-0000-000061B215AE", cn).await.unwrap();
-        println!("{:?}", ci);
-        for a in &ci.atoms {
-            let ac = fetch_atom(&client, &ut.authorization_header_value(), xuid, "00000000-0000-0000-0000-000061B215AE", &a.atom).await.unwrap();
-            // if e.display_name.ends_with(".txt") {
-            //     println!("{}", e.display_name);
-            //     println!("{}", ac);
-            // }
-            blobs.push(Blob { name: a.name.to_owned(), data: base64::engine::general_purpose::STANDARD.encode(ac) });
-        }
-        out_containers.push(Container { name: cn.to_owned(), display_name: e.display_name.to_string(), blobs: blobs });
-    }
-    println!("R {}", delete_container(&client, &ut.authorization_header_value(), xuid, "00000000-0000-0000-0000-000061B215AE").await.unwrap());
-
-    let mut writer = String::new();
-    let mut ser = quick_xml::se::Serializer::new(&mut writer);
-    ser.text_format(quick_xml::se::TextFormat::CData);
-    XbConnectedStorageSpace{
-        context_description: ContextDescription { account: Account { msa: "me".to_owned() }, title: Title { scid: "00000000-0000-0000-0000-000061B215AE".to_owned() } },
-        data: Data { containers: out_containers },
-    }.serialize(ser).unwrap();
-    // quick_xml::se::Serializer::text_format(&mut self, format)
-    println!("{writer}");
-}
-
-
-#[ignore]
-#[tokio::test]
-async fn test_title_access2() {
-    let filter = tracing_subscriber::EnvFilter::from_env("XODUS_LOG");
-    let registry =
-        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(filter));
-
-    {
-        registry.init();
-    }
-    let client = reqwest::Client::new();
-    crate::secrets::init_secrets().expect("Unable to initialize credentials");
-    let tokens = TokenManager::with_keychain_and_memory();
-
-    let dev_token = tokens.get_device_sts_token().unwrap();
-    let Token::Legacy(dev_token) = dev_token else {
-        panic!();
-    };
-    let user_token = tokens.get_user_sts_token().unwrap();
-    let Token::Legacy(legacy) = user_token else {
-        panic!();
-    };
-
-    let xsts_token =
-        crate::api::xbox::run(&client, dev_token, legacy, "http://xboxlive.com").await;
-    
-    let uhs = xsts_token.user_hash().unwrap();
-    let tkn = format!("XBL3.0 x={};{}", uhs, xsts_token.token);
-
-    println!("R {}", lock_container(&client, &tkn, "2535418015510202", "00000000-0000-0000-0000-000061B215AE").await.unwrap());
-
 }

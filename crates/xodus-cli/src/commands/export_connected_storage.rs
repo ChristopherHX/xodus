@@ -1,6 +1,6 @@
+use serde_core::ser::Serialize;
 use std::{fs::File, io::Write, process::ExitCode};
 use xodus::{api::xbox::export_connected_storage_xml, tokens::TokenManager};
-use serde_core::ser::Serialize;
 
 pub async fn run(
     client: &reqwest::Client,
@@ -9,7 +9,7 @@ pub async fn run(
     title_id: i64,
     pfn: &str,
     out: String,
-    scid: Option<&str>
+    scid: Option<&str>,
 ) -> ExitCode {
     let mut file = File::create(out).unwrap();
     let data = export_connected_storage_xml(client, tokens, &msa_id, title_id, pfn, scid).await;

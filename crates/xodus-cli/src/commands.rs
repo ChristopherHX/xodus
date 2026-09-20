@@ -1,5 +1,6 @@
 pub mod clep;
 pub mod download;
+pub mod export_connected_storage;
 pub mod extract;
 pub mod extract_eappx;
 pub mod license;
@@ -9,4 +10,3 @@ pub mod logout;
 pub mod run;
 pub mod splicense;
 pub mod streaming;
-pub mod export_connected_storage;

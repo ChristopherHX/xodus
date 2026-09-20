@@ -10,8 +10,8 @@ pub mod title;
 pub use auth::{authenticate_xbox_user, get_xsts_auth_header, request_xsts_token};
 use base64::Engine;
 use reqwest::Client;
-use serde::Serialize;
 use serde::Deserialize;
+use serde::Serialize;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -90,7 +90,6 @@ pub struct ContainerResponse {
     pub blobs: Vec<ContainerBlob>,
     pub paging_info: PagingInfo,
 }
-
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -175,7 +174,6 @@ pub async fn delete_container(
     Ok(t)
 }
 
-
 pub async fn fetch_containers(
     client: &Client,
     token: &str,
@@ -183,12 +181,12 @@ pub async fn fetch_containers(
     scid: &str,
 ) -> Result<ContainerResponse, Box<dyn std::error::Error>> {
     let r = client
-        .get(
-            format!("https://titlestorage.xboxlive.com/connectedstorage/users/xuid({xuid})/scids/{scid}"),
-        )
+        .get(format!(
+            "https://titlestorage.xboxlive.com/connectedstorage/users/xuid({xuid})/scids/{scid}"
+        ))
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
-        .header("Accept-Language", "en-US")// Required for no http 400
+        .header("Accept-Language", "en-US") // Required for no http 400
         .header("x-xbl-pfn", "Microsoft.BadgerWin10_8wekyb3d8bbwe")
         .send()
         .await?
@@ -205,7 +203,7 @@ pub async fn fetch_container(
     xuid: &str,
     scid: &str,
     container_name: &str,
-    pfn: &str
+    pfn: &str,
 ) -> Result<Atoms, Box<dyn std::error::Error>> {
     let r = client
         .get(
@@ -300,33 +298,90 @@ pub struct XbConnectedStorageSpace {
     pub data: Data,
 }
 
-pub async fn export_connected_storage_xml(client: &Client, tokens: &TokenManager, client_id: &str, title_id: i64, pfn: &str, scid: Option<&str>) -> XbConnectedStorageSpace {
-    let scid = scid.map_or_else(|| uuid::Uuid::from_u64_pair(0, title_id as u64).to_string(), |v|v.to_owned());
+pub async fn export_connected_storage_xml(
+    client: &Client,
+    tokens: &TokenManager,
+    client_id: &str,
+    title_id: i64,
+    pfn: &str,
+    scid: Option<&str>,
+) -> XbConnectedStorageSpace {
+    let scid = scid.map_or_else(
+        || uuid::Uuid::from_u64_pair(0, title_id as u64).to_string(),
+        |v| v.to_owned(),
+    );
 
     let (mut a, resp, dt) = do_sisu(&client, &tokens, client_id, title_id)
         .await
         .expect("ok");
 
-    let xuid = &resp.authorization_token.display_claims.as_ref().unwrap().xui[0]["xid"];
+    let xuid = &resp
+        .authorization_token
+        .display_claims
+        .as_ref()
+        .unwrap()
+        .xui[0]["xid"];
 
-    let ut = a.get_xsts_token(Some(&dt), None, Some(&resp.user_token), "http://xboxlive.com").await.unwrap();
+    let ut = a
+        .get_xsts_token(
+            Some(&dt),
+            None,
+            Some(&resp.user_token),
+            "http://xboxlive.com",
+        )
+        .await
+        .unwrap();
 
     let mut out_containers = Vec::<Container>::new();
-    
-    let containers = fetch_containers(&client, &ut.authorization_header_value(), xuid, &scid).await.unwrap();
+
+    let containers = fetch_containers(&client, &ut.authorization_header_value(), xuid, &scid)
+        .await
+        .unwrap();
     for e in &containers.blobs {
         let mut blobs = Vec::<Blob>::new();
         let cn = e.file_name.strip_suffix(",savedgame").unwrap();
-        let ci = fetch_container(&client, &ut.authorization_header_value(), xuid, &scid, cn, pfn).await.unwrap();
+        let ci = fetch_container(
+            &client,
+            &ut.authorization_header_value(),
+            xuid,
+            &scid,
+            cn,
+            pfn,
+        )
+        .await
+        .unwrap();
         for a in &ci.atoms {
-            let ac = fetch_atom(&client, &ut.authorization_header_value(), xuid, &scid, &a.atom, pfn).await.unwrap();
-            blobs.push(Blob { name: a.name.to_owned(), data: base64::engine::general_purpose::STANDARD.encode(ac) });
+            let ac = fetch_atom(
+                &client,
+                &ut.authorization_header_value(),
+                xuid,
+                &scid,
+                &a.atom,
+                pfn,
+            )
+            .await
+            .unwrap();
+            blobs.push(Blob {
+                name: a.name.to_owned(),
+                data: base64::engine::general_purpose::STANDARD.encode(ac),
+            });
         }
-        out_containers.push(Container { name: cn.to_owned(), display_name: e.display_name.to_string(), blobs: blobs });
+        out_containers.push(Container {
+            name: cn.to_owned(),
+            display_name: e.display_name.to_string(),
+            blobs: blobs,
+        });
     }
 
-    XbConnectedStorageSpace{
-        context_description: ContextDescription { account: Account { msa: "me".to_owned() }, title: Title { scid } },
-        data: Data { containers: out_containers },
+    XbConnectedStorageSpace {
+        context_description: ContextDescription {
+            account: Account {
+                msa: "me".to_owned(),
+            },
+            title: Title { scid },
+        },
+        data: Data {
+            containers: out_containers,
+        },
     }
 }

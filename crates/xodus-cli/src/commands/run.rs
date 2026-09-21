@@ -209,8 +209,8 @@ pub async fn run(
     }
 
     let mut env_value = String::new();
-    let prefix = out_absolute.to_string_lossy();
-    let prefix = prefix.trim_end_matches('/');
+    let nt_prefix = out_absolute.to_string_lossy().replace("/", "\\");
+    let nt_prefix = nt_prefix.trim_end_matches('\\');
 
     let mut nt_entry = None;
 
@@ -219,18 +219,17 @@ pub async fn run(
             env_value.push('|');
         }
 
-        let suffix = fd.0.replace("\\", "/");
-        let suffix = suffix.trim_start_matches('/');
-        let unix_path = format!("{}/{}", prefix, suffix);
+        let nt_suffix = fd.0.trim_start_matches('\\');
+        let nt_path = format!("\\??\\Z:{}\\{}", nt_prefix, nt_suffix);
         if let Some(exe) = &exe {
             if exe == fd.0 {
-                nt_entry = Some(unix_path)
+                nt_entry = Some(nt_path)
             }
         } else if nt_entry.is_none() {
-            nt_entry = Some(unix_path)
+            nt_entry = Some(nt_path)
         }
 
-        env_value.push_str(&format!("{}:{}/{}", fd.1, prefix, suffix))
+        env_value.push_str(&format!("{}:\\??\\Z:{}\\{}", fd.1, nt_prefix, nt_suffix))
     }
 
     let Some(nt_entry) = nt_entry else {
@@ -240,7 +239,7 @@ pub async fn run(
 
     let mut wn = Command::new(wine)
         .arg(nt_entry)
-        .env("WINE_EXE_FILE_MAP", env_value)
+        .env("WINE_DLL_FILE_MAP", env_value)
         .spawn()
         .unwrap();
 

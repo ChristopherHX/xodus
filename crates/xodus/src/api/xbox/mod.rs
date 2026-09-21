@@ -2,7 +2,10 @@ use crate::auth::do_sisu;
 use crate::models::live::ExchangeUserTokenOutcome;
 use crate::models::secrets::{LegacyToken, Token};
 use crate::models::soap;
-use crate::models::xbox::XstsResponse;
+use crate::models::xbox::{
+    Account, Atoms, Blob, Container, ContainerResponse, ContextDescription, Data, Title,
+    XbConnectedStorageSpace, XstsResponse,
+};
 use crate::tokens::TokenManager;
 
 pub mod auth;
@@ -10,11 +13,6 @@ pub mod title;
 pub use auth::{authenticate_xbox_user, get_xsts_auth_header, request_xsts_token};
 use base64::Engine;
 use reqwest::Client;
-use serde::Deserialize;
-use serde::Serialize;
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 pub async fn run(
     client: &reqwest::Client,
@@ -66,62 +64,6 @@ pub async fn run(
         .await
         .expect("Failed to authenticate Xbox user")
 }
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct PagingInfo {
-    pub continuation_token: Option<String>,
-    pub total_items: i64,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainerBlob {
-    pub client_file_time: String,
-    pub display_name: String,
-    pub etag: String,
-    pub file_name: String,
-    pub size: i64,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainerResponse {
-    pub blobs: Vec<ContainerBlob>,
-    pub paging_info: PagingInfo,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct Atom {
-    pub atom: String,
-    pub name: String,
-    pub size: i64,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct Atoms {
-    pub atoms: Vec<Atom>,
-}
-// {
-//     blobs: [
-//         // For each container
-//         {
-//             "clientFileTime": <lastModifiedTime>
-//             "displayName": <containerDisplayName>
-//             "etag": <not exposed to the API but saved in containers.index>
-//             "fileName": <containerName>,savedGame
-//             "size": <totalSize>
-//         }
-//     ],
-//     pagingInfo: {
-//         "continuationToken": null,
-//         "totalItems" <number of containers>
-//     }
-// }
-
-// { "ownerChangedId":<GUID>, "quotaBytes":<Quota> }
 
 pub async fn lock_container(
     client: &Client,
@@ -245,57 +187,6 @@ pub async fn fetch_atom(
     let t = r.bytes().await?;
 
     Ok(t)
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Account {
-    #[serde(rename = "@msa")]
-    pub msa: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Title {
-    #[serde(rename = "@scid")]
-    pub scid: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "PascalCase")]
-pub struct ContextDescription {
-    pub account: Account,
-    pub title: Title,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "PascalCase")]
-pub struct Blob {
-    #[serde(rename = "@name")]
-    pub name: String,
-    #[serde(rename = "$text")]
-    pub data: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "PascalCase")]
-pub struct Container {
-    #[serde(rename = "@name")]
-    pub name: String,
-    #[serde(rename = "@displayName")]
-    pub display_name: String,
-    pub blobs: Vec<Blob>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "PascalCase")]
-pub struct Data {
-    pub containers: Vec<Container>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "PascalCase")]
-pub struct XbConnectedStorageSpace {
-    pub context_description: ContextDescription,
-    pub data: Data,
 }
 
 pub async fn export_connected_storage_xml(

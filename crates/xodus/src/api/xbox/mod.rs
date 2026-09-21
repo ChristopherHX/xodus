@@ -200,7 +200,7 @@ pub async fn export_connected_storage_xml(
         |v| v.to_owned(),
     );
 
-    let (mut a, resp, dt) = do_sisu(&client, &tokens, client_id, title_id)
+    let (mut a, resp, dt) = do_sisu(client, tokens, client_id, title_id)
         .await
         .expect("ok");
 
@@ -223,14 +223,14 @@ pub async fn export_connected_storage_xml(
 
     let mut out_containers = Vec::<Container>::new();
 
-    let containers = fetch_containers(&client, &ut.authorization_header_value(), xuid, &scid)
+    let containers = fetch_containers(client, &ut.authorization_header_value(), xuid, &scid)
         .await
         .unwrap();
     for e in &containers.blobs {
         let mut blobs = Vec::<Blob>::new();
         let cn = e.file_name.strip_suffix(",savedgame").unwrap();
         let ci = fetch_container(
-            &client,
+            client,
             &ut.authorization_header_value(),
             xuid,
             &scid,
@@ -241,7 +241,7 @@ pub async fn export_connected_storage_xml(
         .unwrap();
         for a in &ci.atoms {
             let ac = fetch_atom(
-                &client,
+                client,
                 &ut.authorization_header_value(),
                 xuid,
                 &scid,

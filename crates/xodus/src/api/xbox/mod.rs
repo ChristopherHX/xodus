@@ -258,7 +258,7 @@ pub async fn export_connected_storage_xml(
         out_containers.push(Container {
             name: cn.to_owned(),
             display_name: e.display_name.to_string(),
-            blobs: blobs,
+            blobs,
         });
     }
 

@@ -78,7 +78,6 @@ pub async fn lock_container(
         )
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
-        // .header("Accept-Language", "en-US")// Required for no http 400
         .header("x-xbl-pfn", pfn)
         .header("x-xbl-lock-ver", "1")
         .header("x-xbl-lock-ext", "300")
@@ -103,7 +102,6 @@ pub async fn delete_container(
         )
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
-        // .header("Accept-Language", "en-US")// Required for no http 400
         .header("x-xbl-pfn", pfn)
         .header("x-xbl-lock-ver", "1")
         .header("x-xbl-lock-ext", "300")

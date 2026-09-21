@@ -89,7 +89,7 @@ pub async fn lock_container(
     Ok(t)
 }
 
-pub async fn delete_container(
+pub async fn unlock_container(
     client: &Client,
     token: &str,
     xuid: &str,
@@ -98,7 +98,7 @@ pub async fn delete_container(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let r = client
         .delete(
-            format!("https://titlestorage.xboxlive.com/connectedstorage/users/xuid({xuid})/scids/{scid}/lock?friendlyName=linux"),
+            format!("https://titlestorage.xboxlive.com/connectedstorage/users/xuid({xuid})/scids/{scid}/lock"),
         )
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)

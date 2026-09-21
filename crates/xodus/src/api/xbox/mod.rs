@@ -119,6 +119,7 @@ pub async fn fetch_containers(
     token: &str,
     xuid: &str,
     scid: &str,
+    pfn: &str,
 ) -> Result<ContainerResponse, Box<dyn std::error::Error>> {
     let r = client
         .get(format!(
@@ -126,8 +127,7 @@ pub async fn fetch_containers(
         ))
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
-        .header("Accept-Language", "en-US") // Required for no http 400
-        .header("x-xbl-pfn", "Microsoft.BadgerWin10_8wekyb3d8bbwe")
+        .header("x-xbl-pfn", pfn)
         .send()
         .await?
         .error_for_status()?;
@@ -151,7 +151,6 @@ pub async fn fetch_container(
         )
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
-        .header("Accept-Language", "en-US")// Required for no http 400
         .header("x-xbl-pfn", pfn)
         .send()
         .await?
@@ -176,7 +175,6 @@ pub async fn fetch_atom(
         )
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
-        .header("Accept-Language", "en-US")// Required for no http 400
         .header("x-xbl-pfn", pfn)
         .send()
         .await?
@@ -223,7 +221,7 @@ pub async fn export_connected_storage_xml(
 
     let mut out_containers = Vec::<Container>::new();
 
-    let containers = fetch_containers(client, &ut.authorization_header_value(), xuid, &scid)
+    let containers = fetch_containers(client, &ut.authorization_header_value(), xuid, &scid, pfn)
         .await
         .unwrap();
     for e in &containers.blobs {

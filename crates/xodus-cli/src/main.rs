@@ -135,7 +135,7 @@ enum ConnectedStorageAction {
         msa_id: String,
         title_id: i64,
         pfn: String,
-        out: String,
+        input: String,
         scid: Option<String>,
         #[arg(
             long,
@@ -283,10 +283,10 @@ async fn main() -> ExitCode {
                 commands::connected_storage::download(
                     &client,
                     &tokens,
-                    msa_id,
+                    &msa_id,
                     title_id,
                     &pfn,
-                    out,
+                    &out,
                     scid.as_deref(),
                 )
                 .await
@@ -295,17 +295,17 @@ async fn main() -> ExitCode {
                 msa_id,
                 title_id,
                 pfn,
-                out,
+                input,
                 scid,
                 keep_existing,
             } => {
                 commands::connected_storage::upload(
                     &client,
                     &tokens,
-                    msa_id,
+                    &msa_id,
                     title_id,
                     &pfn,
-                    out,
+                    &input,
                     scid.as_deref(),
                     keep_existing,
                 )

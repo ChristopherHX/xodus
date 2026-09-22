@@ -8,14 +8,14 @@ use xodus::{api::xbox::download_connected_storage_xml, tokens::TokenManager};
 pub async fn download(
     client: &reqwest::Client,
     tokens: &TokenManager,
-    msa_id: String,
+    msa_id: &str,
     title_id: i64,
     pfn: &str,
-    out: String,
+    out: &str,
     scid: Option<&str>,
 ) -> ExitCode {
     let mut file = File::create(out).unwrap();
-    let data = download_connected_storage_xml(client, tokens, &msa_id, title_id, pfn, scid)
+    let data = download_connected_storage_xml(client, tokens, msa_id, title_id, pfn, scid)
         .await
         .unwrap();
     let mut writer = String::new();
@@ -29,10 +29,10 @@ pub async fn download(
 pub async fn upload(
     client: &reqwest::Client,
     tokens: &TokenManager,
-    msa_id: String,
+    msa_id: &str,
     title_id: i64,
     pfn: &str,
-    input: String,
+    input: &str,
     scid: Option<&str>,
     keep_existing: bool,
 ) -> ExitCode {
@@ -43,7 +43,7 @@ pub async fn upload(
     upload_connected_storage_xml(
         client,
         tokens,
-        &msa_id,
+        msa_id,
         title_id,
         pfn,
         scid,

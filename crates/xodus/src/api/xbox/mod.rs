@@ -6,8 +6,8 @@ use crate::models::secrets::{LegacyToken, Token};
 use crate::models::soap;
 use crate::models::xbox::{
     Account, Atom, Atoms, Blob, BlobCreationRequest, BlobCreationResponse, BlobSubmitRequest,
-    Container, ContainerResponse, ContextDescription, Data, Title, XbConnectedStorageSpace,
-    XstsResponse,
+    Container, ContainerResponse, ContextDescription, Data, PagingInfo, Title,
+    XbConnectedStorageSpace, XstsResponse,
 };
 use crate::tokens::TokenManager;
 
@@ -17,7 +17,7 @@ pub use auth::{authenticate_xbox_user, get_xsts_auth_header, request_xsts_token}
 use base64::Engine;
 use bytes::Bytes;
 use kryptering::random_bytes;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 
 pub async fn run(
     client: &reqwest::Client,
@@ -125,21 +125,50 @@ pub async fn fetch_containers(
     xuid: &str,
     scid: &str,
     pfn: &str,
+    continuation_token: Option<&str>,
 ) -> Result<ContainerResponse, Box<dyn std::error::Error>> {
     let r = client
         .get(format!(
-            "https://titlestorage.xboxlive.com/connectedstorage/users/xuid({xuid})/scids/{scid}"
+            "https://titlestorage.xboxlive.com/connectedstorage/users/xuid({xuid})/scids/{scid}{}",
+            continuation_token.map_or("".to_owned(), |c| format!("?continuationToken={c}"))
         ))
         .header("x-xbl-contract-version", "2")
         .header("Authorization", token)
         .header("x-xbl-pfn", pfn)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
 
-    let t = r.json::<ContainerResponse>().await?;
+    if r.status() == StatusCode::NOT_FOUND {
+        return Ok(ContainerResponse {
+            blobs: vec![],
+            paging_info: PagingInfo {
+                continuation_token: None,
+                total_items: 0,
+            },
+        });
+    }
+
+    let t = r.error_for_status()?.json::<ContainerResponse>().await?;
 
     Ok(t)
+}
+
+pub async fn fetch_all_containers(
+    client: &Client,
+    token: &str,
+    xuid: &str,
+    scid: &str,
+    pfn: &str,
+) -> Result<ContainerResponse, Box<dyn std::error::Error>> {
+    let mut result = fetch_containers(client, token, xuid, scid, pfn, None).await?;
+
+    while let Some(pi) = result.paging_info.continuation_token {
+        let mut nr = fetch_containers(client, token, xuid, scid, pfn, Some(&pi)).await?;
+        result.blobs.append(&mut nr.blobs);
+        result.paging_info = nr.paging_info;
+    }
+
+    return Ok(result);
 }
 
 pub async fn create_container(
@@ -353,10 +382,8 @@ pub async fn download_connected_storage_xml(
 
     let mut out_containers = Vec::<Container>::new();
 
-    let _ = lock_container(client, &ut.authorization_header_value(), xuid, &scid, pfn).await?;
-
     let containers =
-        fetch_containers(client, &ut.authorization_header_value(), xuid, &scid, pfn).await?;
+        fetch_all_containers(client, &ut.authorization_header_value(), xuid, &scid, pfn).await?;
     for e in &containers.blobs {
         let Some(cn) = e.file_name.strip_suffix(",savedgame") else {
             continue;
@@ -446,7 +473,7 @@ pub async fn upload_connected_storage_xml(
     let _ = lock_container(client, &ut.authorization_header_value(), xuid, &scid, pfn).await?;
 
     let containers =
-        fetch_containers(client, &ut.authorization_header_value(), xuid, &scid, pfn).await?;
+        fetch_all_containers(client, &ut.authorization_header_value(), xuid, &scid, pfn).await?;
 
     let mut to_keep = HashSet::new();
 

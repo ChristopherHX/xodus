@@ -187,6 +187,7 @@ pub struct Blob {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct Blobs {
+    #[serde(default)]
     pub blob: Vec<Blob>,
 }
 
@@ -207,6 +208,7 @@ pub struct Container {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct Containers {
+    #[serde(default)]
     pub container: Vec<Container>,
 }
 

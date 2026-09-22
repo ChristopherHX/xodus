@@ -6,6 +6,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use xodus::tokens::TokenManager;
 
+use crate::commands::connected_storage::ConnectedStorageIdentity;
+
 mod commands;
 mod license;
 mod package;
@@ -283,11 +285,13 @@ async fn main() -> ExitCode {
                 commands::connected_storage::download(
                     &client,
                     &tokens,
-                    &msa_id,
-                    title_id,
-                    &pfn,
-                    &out,
-                    scid.as_deref(),
+                    &ConnectedStorageIdentity {
+                        msa_id: &msa_id,
+                        title_id: title_id,
+                        pfn: &pfn,
+                        file: &out,
+                        scid: scid.as_deref(),
+                    },
                 )
                 .await
             }
@@ -302,11 +306,13 @@ async fn main() -> ExitCode {
                 commands::connected_storage::upload(
                     &client,
                     &tokens,
-                    &msa_id,
-                    title_id,
-                    &pfn,
-                    &input,
-                    scid.as_deref(),
+                    &ConnectedStorageIdentity {
+                        msa_id: &msa_id,
+                        title_id: title_id,
+                        pfn: &pfn,
+                        file: &input,
+                        scid: scid.as_deref(),
+                    },
                     keep_existing,
                 )
                 .await

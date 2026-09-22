@@ -126,8 +126,10 @@ pub struct PagingInfo {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerBlob {
-    pub client_file_time: String,
-    pub display_name: String,
+    #[serde(default)]
+    pub client_file_time: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub etag: String,
     pub file_name: String,
     pub size: i64,
@@ -140,7 +142,7 @@ pub struct ContainerResponse {
     pub paging_info: PagingInfo,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Atom {
     pub atom: String,
@@ -148,7 +150,7 @@ pub struct Atom {
     pub size: i64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Atoms {
     pub atoms: Vec<Atom>,
@@ -187,8 +189,12 @@ pub struct Blob {
 pub struct Container {
     #[serde(rename = "@name")]
     pub name: String,
-    #[serde(rename = "@displayName")]
-    pub display_name: String,
+    #[serde(default, rename = "@clientFileTime")]
+    pub client_file_time: Option<String>,
+    #[serde(default, rename = "@displayName")]
+    pub display_name: Option<String>,
+    #[serde(default, rename = "@etag")]
+    pub etag: Option<String>,
     pub blobs: Vec<Blob>,
 }
 
@@ -203,4 +209,23 @@ pub struct Data {
 pub struct XbConnectedStorageSpace {
     pub context_description: ContextDescription,
     pub data: Data,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobCreationRequest {
+    pub size: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobCreationResponse {
+    pub blob_uri: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobSubmitRequest {
+    pub block_ids: Vec<String>,
+    pub size: i64,
 }

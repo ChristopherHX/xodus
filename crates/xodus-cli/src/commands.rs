@@ -1,6 +1,6 @@
 pub mod clep;
+pub mod connected_storage;
 pub mod download;
-pub mod export_connected_storage;
 pub mod extract;
 pub mod extract_eappx;
 pub mod license;

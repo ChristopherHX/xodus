@@ -6,7 +6,7 @@ use crate::models::secrets::{LegacyToken, Token};
 use crate::models::soap;
 use crate::models::xbox::{
     Account, Atom, Atoms, Blob, BlobCreationRequest, BlobCreationResponse, BlobSubmitRequest,
-    Container, ContainerResponse, ContextDescription, Data, PagingInfo, Title,
+    Blobs, Container, ContainerResponse, Containers, ContextDescription, Data, PagingInfo, Title,
     XbConnectedStorageSpace, XstsResponse,
 };
 use crate::tokens::TokenManager;
@@ -311,9 +311,17 @@ pub async fn create_atom(
 
     let blk_id = base64::engine::general_purpose::STANDARD_NO_PAD.encode(random_bytes(12).unwrap());
 
+    let mut u = url::Url::parse(&upload.blob_uri)?;
+    let u = u
+        .query_pairs_mut()
+        .append_pair("comp", "block")
+        .append_pair("blockid", &blk_id)
+        .finish()
+        .as_str();
+
     let l = data.len() as i64;
     client
-        .put(format!("{}&comp=block&blockid={}", upload.blob_uri, blk_id))
+        .put(u)
         .header("content-length", l)
         .header("x-ms-blob-type", "BlockBlob")
         .body(data)
@@ -418,7 +426,7 @@ pub async fn download_connected_storage_xml(
             client_file_time: e.client_file_time.clone(),
             etag: Some(e.etag.clone()),
             display_name: e.display_name.clone(),
-            blobs,
+            blobs: Blobs { blob: blobs },
         });
     }
 
@@ -430,7 +438,9 @@ pub async fn download_connected_storage_xml(
             title: Title { scid },
         },
         data: Data {
-            containers: out_containers,
+            containers: Containers {
+                container: out_containers,
+            },
         },
     })
 }
@@ -477,7 +487,7 @@ pub async fn upload_connected_storage_xml(
 
     let mut to_keep = HashSet::new();
 
-    for c in &storage.data.containers {
+    for c in &storage.data.containers.container {
         if let Some((i, b)) = containers.blobs.iter().enumerate().find(|(_, b)| {
             b.file_name
                 .strip_suffix(",savedgame")
@@ -493,12 +503,12 @@ pub async fn upload_connected_storage_xml(
 
         let mut atoms = Vec::new();
 
-        for atom in &c.blobs {
+        for atom in &c.blobs.blob {
             let b = base64::engine::general_purpose::STANDARD.decode(&atom.data)?;
 
             let a = Atom {
                 atom: uuid::Uuid::new_v4().to_string().to_uppercase(),
-                name: "data2".to_owned(),
+                name: atom.name.clone(),
                 size: b.len() as i64,
             };
 
@@ -520,8 +530,8 @@ pub async fn upload_connected_storage_xml(
             &ut.authorization_header_value(),
             xuid,
             &scid,
-            &c.name,
             pfn,
+            &c.name,
             c.client_file_time.as_deref(),
             c.display_name.as_deref(),
             Atoms { atoms: atoms },

@@ -40,7 +40,7 @@ pub async fn upload(
     let mut content = String::new();
     file.read_to_string(&mut content).unwrap();
     let storage: XbConnectedStorageSpace = quick_xml::de::from_str(&content).unwrap();
-    let data = upload_connected_storage_xml(
+    upload_connected_storage_xml(
         client,
         tokens,
         &msa_id,
@@ -52,10 +52,5 @@ pub async fn upload(
     )
     .await
     .unwrap();
-    let mut writer = String::new();
-    let mut ser = quick_xml::se::Serializer::new(&mut writer);
-    ser.text_format(quick_xml::se::TextFormat::CData);
-    data.serialize(ser).unwrap();
-    file.write_all(writer.as_bytes()).unwrap();
     ExitCode::SUCCESS
 }

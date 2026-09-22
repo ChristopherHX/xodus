@@ -186,6 +186,12 @@ pub struct Blob {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
+pub struct Blobs {
+    pub blob: Vec<Blob>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
 pub struct Container {
     #[serde(rename = "@name")]
     pub name: String,
@@ -195,13 +201,19 @@ pub struct Container {
     pub display_name: Option<String>,
     #[serde(default, rename = "@etag")]
     pub etag: Option<String>,
-    pub blobs: Vec<Blob>,
+    pub blobs: Blobs,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct Containers {
+    pub container: Vec<Container>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct Data {
-    pub containers: Vec<Container>,
+    pub containers: Containers,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

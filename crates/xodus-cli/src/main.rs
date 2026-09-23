@@ -287,7 +287,7 @@ async fn main() -> ExitCode {
                     &tokens,
                     &ConnectedStorageIdentity {
                         msa_id: &msa_id,
-                        title_id: title_id,
+                        title_id,
                         pfn: &pfn,
                         file: &out,
                         scid: scid.as_deref(),
@@ -308,7 +308,7 @@ async fn main() -> ExitCode {
                     &tokens,
                     &ConnectedStorageIdentity {
                         msa_id: &msa_id,
-                        title_id: title_id,
+                        title_id,
                         pfn: &pfn,
                         file: &input,
                         scid: scid.as_deref(),

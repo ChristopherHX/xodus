@@ -381,7 +381,7 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                 let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
                 http_reader(c2.clone(), url.to_owned(), out_io.clone(), target_offset, target_end.div_ceil(4096)*4096);
 
-                let mut hr = HashedReader::new(ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }, ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None });
+                let mut hr = HashedReader::new(ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }, ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None }, &l0_hashs);
                 
                 // let mut buf = [0u8; 8190];
                 // hr.read_full(&mut buf);
@@ -554,10 +554,12 @@ struct HashedReader<'t> {
     hash_reader: ChannelReader<'t>,
     hash_buffer: [u8; 4096],
     hash_offset: usize,
+    l0_hashs: &'t [u8],
+    l0_hash_offset: usize,
 }
 
 impl<'t> HashedReader<'t> {
-    fn new(data_reader: ChannelReader<'t>, hash_reader: ChannelReader<'t>) -> Self {
+    fn new(data_reader: ChannelReader<'t>, hash_reader: ChannelReader<'t>, l0_hashs: &'t [u8]) -> Self {
         Self {
             buffer: [0u8; 4096],
             hash_buffer: [0u8; 4096],
@@ -565,6 +567,8 @@ impl<'t> HashedReader<'t> {
             buffered_len: 0,
             data_reader: data_reader,
             hash_reader: hash_reader,
+            l0_hashs: l0_hashs,
+            l0_hash_offset: 0,
         }
     }
 
@@ -614,6 +618,22 @@ impl<'t> HashedReader<'t> {
                     item
                 } else {
                     self.hash_reader.read_full(&mut self.hash_buffer);
+                    // check this hash
+                    if self.l0_hash_offset >= HASH_ENTRIES_IN_PAGE {
+                        self.l0_hash_offset = 0;
+                        self.l0_hashs = &self.l0_hashs[4096..];
+                    }
+                    let c = XvdHashEntry::from_slice({
+                        let item = &self.l0_hashs[self.l0_hash_offset*HASH_ENTRY_LENGTH..(self.l0_hash_offset+1)*HASH_ENTRY_LENGTH];
+                        self.l0_hash_offset += 1;
+                        item
+                    });
+                    let mut sha = sha2::Sha256::new();
+                    sha.update(&self.hash_buffer);
+                    if sha.finalize()[0..20] != c.block_hash {
+                        panic!("SHA Mismatch HT!");
+                    }
+
                     let item = &self.hash_buffer[0..HASH_ENTRY_LENGTH];
                     self.hash_offset = 1;
                     item

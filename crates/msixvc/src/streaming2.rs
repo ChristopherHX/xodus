@@ -168,10 +168,10 @@ where
     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(
         out_io,
-        layout.hash_tree.start.to_bytes().0 as usize
-            + second_level.page_range.start.to_bytes().0 as usize,
-        layout.hash_tree.start.to_bytes().0 as usize
-            + second_level.page_range.end.to_bytes().0 as usize
+        (layout.hash_tree.start
+            + second_level.page_range.start).to_bytes().0 as usize,
+        (layout.hash_tree.start
+            + second_level.page_range.end).to_bytes().0 as usize
             - 1,
     );
     let mut l3_hashs = vec![0u8; 4096];
@@ -196,10 +196,10 @@ where
     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(
         out_io,
-        layout.hash_tree.start.to_bytes().0 as usize
-            + second_level.page_range.start.to_bytes().0 as usize,
-        layout.hash_tree.start.to_bytes().0 as usize
-            + second_level.page_range.end.to_bytes().0 as usize
+        (layout.hash_tree.start
+            + second_level.page_range.start).to_bytes().0 as usize,
+        (layout.hash_tree.start
+            + second_level.page_range.end).to_bytes().0 as usize
             - 1,
     );
 
@@ -293,10 +293,12 @@ where
                     let (out_hash, in_hash) = mpsc::channel::<Bytes>(100);
                     reader.new(
                         out_hash,
-                        layout.hash_tree.start.to_bytes().0 as usize
-                            + forth_level.page_range.start.to_bytes().0 as usize,
-                        layout.hash_tree.start.to_bytes().0 as usize
-                            + forth_level.page_range.start.to_bytes().0 as usize
+                        (layout.hash_tree.start + forth_level.page_range.start)
+                            .to_bytes()
+                            .0 as usize,
+                        (layout.hash_tree.start + forth_level.page_range.start)
+                            .to_bytes()
+                            .0 as usize
                             + hash_len_l0 as usize
                             - 1,
                     );
@@ -448,8 +450,9 @@ where
                         let (hash_io, in_hash) = mpsc::channel::<Bytes>(100);
                         reader.new(
                             hash_io,
-                            layout.hash_tree.start.to_bytes().0 as usize
-                                + forth_level.page_range.start.to_bytes().0 as usize
+                            (layout.hash_tree.start + forth_level.page_range.start)
+                                .to_bytes()
+                                .0 as usize
                                 + hash_pages * 4096,
                             0,
                         );

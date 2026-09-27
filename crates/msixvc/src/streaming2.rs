@@ -3,6 +3,7 @@ use std::collections::{VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Div;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
@@ -12,29 +13,67 @@ use reqwest::header::RANGE;
 use sha2::Digest;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use zerocopy::IntoBytes;
 
 use crate::layout::{PAGE_SIZE, Pages};
 use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, MAX_HASHED_PAGES, XvdLayout};
 use crate::models::xvd::{HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionSpecifier, XvdHashEntry, XvdHeader, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader};
 
+async fn start_stream(client: &Client, url: &str, stall_timeout: Duration, start: usize, end: usize) -> Option<impl futures_core::Stream<Item = reqwest::Result<Bytes>>> {
+    let mut req = client.get(url);
+    let status_code = if end != 0 {
+        req = req.header(RANGE, format!("bytes={start}-{end}"));
+        206
+    } else if start != 0 {
+        req = req.header(RANGE, format!("bytes={start}-"));
+        206
+    } else {
+        200
+    };
+    if let Ok(Ok(Ok(response))) = timeout(
+        stall_timeout,
+        req
+            .send(),
+    )
+    .await
+    .map(|o| o.map(|o| o.error_for_status()))
+        && response.status() == status_code
+    {
+        Some(response.bytes_stream())
+    } else {
+        None
+    }
+}
+
 fn http_reader(c2: Client, url: String, out_io: Sender<Bytes>, start: usize, end: usize) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut req = c2.get(url);
-        if end != 0 {
-            req = req.header(RANGE, format!("bytes={start}-{end}"))
-        } else if start != 0 {
-            req = req.header(RANGE, format!("bytes={start}-"))
-        }
-        let ex = req.send().await.unwrap();
-        let mut s = ex.bytes_stream();
+        let stall_timeout = Duration::from_secs(5);
+        let mut v = start;
+        let mut stream = start_stream(&c2, &url, stall_timeout, v, end).await;
         // handle connection timeout
-        while let Some(s) = s.next().await {
-            if let Ok(r) = s {
-                // handle error?
-                if out_io.send(r).await.is_err() {
-                    return;
-                }
+        loop {
+            if v > end {
+                return;
+            }
+            let next = if let Some(s) = stream.as_mut() {
+                timeout(stall_timeout, s.next()).await
+            } else {
+                Ok(None)
+            };
+            let data;
+            if let Ok(Some(Ok(b))) = next {
+                data = b;
+            } else {
+                // error
+                stream = start_stream(&c2, &url, Duration::from_secs(5), v, end).await;
+                continue;
+            }
+
+            v += data.len();
+
+            if out_io.send(data).await.is_err() {
+                return;
             }
         }
     })
@@ -104,7 +143,7 @@ fn fetch_and_verify_top_level<ReaderFactory>(reader: &ReaderFactory, layout: &Xv
     where ReaderFactory: RangeReaderFactory
 {
     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-    reader.new(out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.end.to_bytes().0 as usize - 1);
+    reader.new(out_io, layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.end.to_bytes().0 as usize - 1);
     let mut l3_hashs = vec![0u8; 4096];
     read_full(&mut in_prov_valid, &mut l3_hashs, None);
     let mut sha = sha2::Sha256::new();
@@ -119,7 +158,7 @@ fn fetch_and_verify_hash_level<ReaderFactory>(reader: &ReaderFactory, layout: &X
     where ReaderFactory: RangeReaderFactory
 {
     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-    reader.new(out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.end.to_bytes().0 as usize - 1);
+    reader.new(out_io, layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.end.to_bytes().0 as usize - 1);
 
     let mut l2_hashs = Vec::with_capacity(second_level.num_pages().to_bytes().0 as usize);
     l2_hashs.resize(l2_hashs.capacity(), 0u8);
@@ -137,11 +176,10 @@ fn fetch_and_verify_hash_level<ReaderFactory>(reader: &ReaderFactory, layout: &X
 pub async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn std::error::Error>>
     where ReaderFactory: RangeReaderFactory + Send + 'static
 {
-    let mut tasks = Vec::new();
     {
         let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-        tasks.push(reader.new(out_io.clone(), 0, 4096));
-        tasks.push(tokio::task::spawn_blocking(move ||{
+        reader.new(out_io, 0, 4096);
+        tokio::task::spawn_blocking(move ||{
             (|| -> Result<(), Box<dyn std::error::Error>> {
                 let mut xvd_header_buf = XvdHeader::buffer();
                 let _ = read_full(&mut in_prov_valid, &mut xvd_header_buf, None);
@@ -183,10 +221,10 @@ pub async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box
 
                 let mut hr = {
                     let (out_hash, in_hash) = mpsc::channel::<Bytes>(100);
-                    reader.new(out_hash.clone(), layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_len_l0 as usize - 1);
+                    reader.new(out_hash, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_len_l0 as usize - 1);
 
                     let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
-                    reader.new(out_io.clone(), target_offset, target_end.div_ceil(4096)*4096);
+                    reader.new(out_io, target_offset, target_end.div_ceil(4096)*4096);
 
                     HashedReader::new(ChannelReader { in_prov_valid: in_prov_valid, remaining_b: None }, ChannelReader { in_prov_valid: in_hash, remaining_b: None }, &l1_hashs)
                 };
@@ -279,7 +317,7 @@ pub async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box
                 {
                     let xvc_info_reader = {
                         let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
-                        reader.new(out_io.clone(), layout.xvc_info.start.to_bytes().0 as usize, 0);
+                        reader.new(out_io, layout.xvc_info.start.to_bytes().0 as usize, 0);
                         ChannelReader { in_prov_valid: in_prov_valid, remaining_b: None }
                     };
                     // absolute file page position where we load data
@@ -353,14 +391,12 @@ pub async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box
                             println!(" {} {}", String::from_utf16(&s.key[..kl]).unwrap(), String::from_utf16(&s.value[..vl]).unwrap());
                         }
                     }
+                    println!("done");
                 }
                 Ok(())
             })().unwrap();
-        }));
+        }).await?;
     };
-    for l in tasks {
-        l.await?;
-    }
     Ok(())
 }
 

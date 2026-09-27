@@ -472,9 +472,9 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                         http_reader(c2.clone(), url.to_owned(), out_io.clone(), layout.xvc_info.start.to_bytes().0 as usize, 0);
                         ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }
                     };
-                    // absolute file position where we load data
+                    // absolute file page position where we load data
                     let data_region_start = layout.xvc_info.start;
-                    // byte offset relative to hashed region of l0
+                    // page offset relative to hashed region of l0
                     let hash_region_loc = data_region_start - layout.user_data.start;
                     // page offset relative to hashed region of l0
                     let hash_region_loc_pages = hash_region_loc.0 as usize;

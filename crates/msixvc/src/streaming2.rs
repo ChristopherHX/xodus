@@ -700,7 +700,7 @@ impl<'t> HashedReader<'t> {
         }
     }
     fn read_full_discard(&mut self, l: usize) {
-        let mut discard_buf = [0u8; 4096 / 4];
+        let mut discard_buf = [0u8; 4096 * 4];
         let bz = discard_buf.len();
         let end = l.div(bz);
         for _ in 0..end {

@@ -236,17 +236,9 @@ where
                 let mut xvd_header_buf = XvdHeader::buffer();
                 let _ = read_full(&mut in_prov_valid, &mut xvd_header_buf, None);
                 let xvd_header = XvdHeader::try_from_array(&xvd_header_buf)?;
-                if xvd_header.number_of_hashed_pages() < Pages(1)
-                    || xvd_header.number_of_hashed_pages() > MAX_HASHED_PAGES
-                {
-                    // actually an error, but ensure this to not cause panic in xvd_header.layout()
-                    return Ok(());
-                }
                 let layout = xvd_header.layout();
                 let target_offset = layout.user_data.start.to_bytes().0 as usize;
                 let target_end = target_offset + layout.user_data.len.0 as usize;
-
-                println!("{:?}", layout);
 
                 let top_level = layout.hash_tree_layout.level3;
                 let second_level = layout.hash_tree_layout.level2;

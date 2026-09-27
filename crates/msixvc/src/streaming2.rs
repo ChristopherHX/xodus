@@ -288,6 +288,32 @@ fn file_reader(path: String, out_io: Sender<Bytes>, start: usize, end: usize) ->
     })
 }
 
+trait RangeReaderFactory {
+    fn new(&self, out_io: Sender<Bytes>, start: usize, end: usize) -> JoinHandle<()>;
+}
+
+struct FileReaderFactory {
+    path: String,
+}
+
+impl RangeReaderFactory for FileReaderFactory {
+    fn new(&self, out_io: Sender<Bytes>, start: usize, end: usize) -> JoinHandle<()> {
+        file_reader(self.path.clone(), out_io, start, end)
+    }
+}
+
+struct HttpReaderFactory {
+    client: Client,
+    url: String,
+}
+
+impl RangeReaderFactory for HttpReaderFactory {
+    fn new(&self, out_io: Sender<Bytes>, start: usize, end: usize) -> JoinHandle<()> {
+        http_reader(self.client.clone(), self.url.clone(), out_io, start, end)
+    }
+}
+
+
 #[tokio::test]
 async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
     let c =  reqwest::Client::new();
@@ -534,8 +560,6 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
 
                     for (r, f) in region_headers.iter().zip(region_flags) {
                         let c = r.description.iter().take_while(|c| **c != 0).count();
-                        // r.flags.
-                        // r.region_id.to_le_bytes()
                         println!("Region: {} {:?} {:x}", String::from_utf16(&r.description[0..c]).unwrap(), r.flags, f);
                         for s in region_specs.iter().filter(|s| r.region_id == s.region_id) {
                             let kl = s.key.iter().take_while(|c| **c != 0).count();

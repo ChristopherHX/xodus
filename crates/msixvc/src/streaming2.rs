@@ -168,10 +168,12 @@ where
     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(
         out_io,
-        (layout.hash_tree.start
-            + second_level.page_range.start).to_bytes().0 as usize,
-        (layout.hash_tree.start
-            + second_level.page_range.end).to_bytes().0 as usize
+        (layout.hash_tree.start + second_level.page_range.start)
+            .to_bytes()
+            .0 as usize,
+        (layout.hash_tree.start + second_level.page_range.end)
+            .to_bytes()
+            .0 as usize
             - 1,
     );
     let mut l3_hashs = vec![0u8; 4096];
@@ -196,10 +198,12 @@ where
     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(
         out_io,
-        (layout.hash_tree.start
-            + second_level.page_range.start).to_bytes().0 as usize,
-        (layout.hash_tree.start
-            + second_level.page_range.end).to_bytes().0 as usize
+        (layout.hash_tree.start + second_level.page_range.start)
+            .to_bytes()
+            .0 as usize,
+        (layout.hash_tree.start + second_level.page_range.end)
+            .to_bytes()
+            .0 as usize
             - 1,
     );
 

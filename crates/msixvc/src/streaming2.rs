@@ -144,8 +144,7 @@ async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn
         tasks.push(tokio::task::spawn_blocking(move ||{
             (|| -> Result<(), Box<dyn std::error::Error>> {
                 let mut xvd_header_buf = XvdHeader::buffer();
-                let mut remaining_b = read_full(&mut in_prov_valid, &mut xvd_header_buf, None);
-                let _ = remaining_b;
+                let _ = read_full(&mut in_prov_valid, &mut xvd_header_buf, None);
                 let xvd_header = XvdHeader::try_from_array(&xvd_header_buf)?;
                 if xvd_header.number_of_hashed_pages() < Pages(1) || xvd_header.number_of_hashed_pages() > MAX_HASHED_PAGES {
                     // actually an error, but ensure this to not cause panic in xvd_header.layout()
@@ -181,13 +180,16 @@ async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn
                 let pages_len = data_len.div_ceil(4096);
                 // div_ceil, since we need to validate the hash block and that works only by having them fully.
                 let hash_len_l0 = pages_len.div_ceil(HASH_ENTRIES_IN_PAGE) * 4096;
-                let (out_hash, mut in_hash) = mpsc::channel::<Bytes>(100);
-                reader.new(out_hash.clone(), layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_len_l0 as usize - 1);
 
-                let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-                reader.new(out_io.clone(), target_offset, target_end.div_ceil(4096)*4096);
+                let mut hr = {
+                    let (out_hash, in_hash) = mpsc::channel::<Bytes>(100);
+                    reader.new(out_hash.clone(), layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_len_l0 as usize - 1);
 
-                let mut hr = HashedReader::new(ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }, ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None }, &l1_hashs);
+                    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
+                    reader.new(out_io.clone(), target_offset, target_end.div_ceil(4096)*4096);
+
+                    HashedReader::new(ChannelReader { in_prov_valid: in_prov_valid, remaining_b: None }, ChannelReader { in_prov_valid: in_hash, remaining_b: None }, &l1_hashs)
+                };
 
                 let mut buf = XvdUserDataHeader::buffer();
                 hr.read_full(&mut buf);
@@ -271,10 +273,10 @@ async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn
                 }
 
                 {
-                    let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-                    let mut xvc_info_reader = {
+                    let xvc_info_reader = {
+                        let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
                         reader.new(out_io.clone(), layout.xvc_info.start.to_bytes().0 as usize, 0);
-                        ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }
+                        ChannelReader { in_prov_valid: in_prov_valid, remaining_b: None }
                     };
                     // absolute file page position where we load data
                     let data_region_start = layout.xvc_info.start;
@@ -290,10 +292,10 @@ async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn
                     let hash_pages_l1 = hash_pages.div(HASH_ENTRIES_IN_PAGE);
                     // hash index of l1 hash level
                     let hash_pages_l1_index = hash_pages % HASH_ENTRIES_IN_PAGE;
-                    let (hash_io, mut in_hash) = mpsc::channel::<Bytes>(100);
                     let hash_reader = {
+                        let (hash_io, in_hash) = mpsc::channel::<Bytes>(100);
                         reader.new(hash_io, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_pages * 4096, 0);
-                        ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None }
+                        ChannelReader { in_prov_valid: in_hash, remaining_b: None }
                     };
                     let mut xvc_info_reader = HashedReader {
                         buffer: [0u8; 4096],
@@ -397,28 +399,28 @@ fn read_full_discard(in_prov_valid: &mut Receiver<Bytes>, l: usize, mut remainin
     None
 }
 
-struct ChannelReader<'t> {
-    in_prov_valid: &'t mut Receiver<Bytes>,
+struct ChannelReader {
+    in_prov_valid: Receiver<Bytes>,
     remaining_b: Option<Bytes>,
 }
 
-impl<'t> ChannelReader<'t> {
+impl ChannelReader {
     fn read_full(&mut self, b: &mut [u8]) {
-        self.remaining_b = read_full(self.in_prov_valid, b, self.remaining_b.take());
+        self.remaining_b = read_full(&mut self.in_prov_valid, b, self.remaining_b.take());
         let Some(_) = &self.remaining_b else {
             panic!("No data!");
         };
     }
     fn read_full_discard(&mut self, l: usize) {
-        self.remaining_b = read_full_discard(self.in_prov_valid, l, self.remaining_b.take());
+        self.remaining_b = read_full_discard(&mut self.in_prov_valid, l, self.remaining_b.take());
     }
 }
 
 struct HashedReader<'t> {
     buffer: [u8; 4096],
     buffered_len: usize,
-    data_reader: ChannelReader<'t>,
-    hash_reader: ChannelReader<'t>,
+    data_reader: ChannelReader,
+    hash_reader: ChannelReader,
     hash_buffer: [u8; 4096],
     hash_offset: usize,
     l1_hashs: &'t [u8],
@@ -426,7 +428,7 @@ struct HashedReader<'t> {
 }
 
 impl<'t> HashedReader<'t> {
-    fn new(data_reader: ChannelReader<'t>, hash_reader: ChannelReader<'t>, l0_hashs: &'t [u8]) -> Self {
+    fn new(data_reader: ChannelReader, hash_reader: ChannelReader, l1_hashs: &'t [u8]) -> Self {
         Self {
             buffer: [0u8; 4096],
             hash_buffer: [0u8; 4096],
@@ -434,11 +436,11 @@ impl<'t> HashedReader<'t> {
             buffered_len: 0,
             data_reader: data_reader,
             hash_reader: hash_reader,
-            l1_hashs: l0_hashs,
+            l1_hashs,
             l1_hash_offset: 0,
         }
     }
-    fn newExt(data_reader: ChannelReader<'t>, hash_reader: ChannelReader<'t>, l0_hashs: &'t [u8], layout: &XvdLayout, data_start: usize) -> Self {
+    fn newExt(data_reader: ChannelReader, hash_reader: ChannelReader, l1_hashs: &'t [u8], layout: &XvdLayout, data_start: usize) -> Self {
         Self {
             buffer: [0u8; 4096],
             hash_buffer: [0u8; 4096],
@@ -446,11 +448,10 @@ impl<'t> HashedReader<'t> {
             buffered_len: 0,
             data_reader: data_reader,
             hash_reader: hash_reader,
-            l1_hashs: l0_hashs,
+            l1_hashs,
             l1_hash_offset: 0,
         }
     }
-
 
     fn read_full(&mut self, b: &mut [u8]) {
         // we need to read ahead here by 4096 bytes

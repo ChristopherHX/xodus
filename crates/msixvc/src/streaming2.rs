@@ -331,18 +331,12 @@ where
                         // TODO assert we are currently at position o
                         let _ = o;
                         if file.ends_with("SegmentMetadata.bin") {
-                            // let mut data =  Vec::with_capacity(s as usize);
-                            // data.resize(data.capacity(), 0);
+                            // TODO assert size o + s is the position
                             let segment_header = {
                                 let mut buf = XvdSegmentMetadataHeader::buffer();
                                 hr.read_full(&mut buf);
                                 XvdSegmentMetadataHeader::try_from_array(&buf)?
                             };
-                            let paths_offset = segment_header.header_length as u64
-                                + segment_header.segment_count as u64 * 0x10;
-
-                            // TODO add asserts for resilence against attacks that are not covered by hash verification
-                            let _ = paths_offset;
 
                             let mut segments =
                                 Vec::with_capacity(segment_header.segment_count as usize);

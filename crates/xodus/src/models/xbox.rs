@@ -23,7 +23,7 @@ pub struct UserAuthProperties {
 pub struct XstsResponse {
     pub not_after: chrono::DateTime<chrono::Utc>,
     pub token: String,
-    display_claims: DisplayClaims,
+    // display_claims: DisplayClaims,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -50,10 +50,7 @@ struct XtiClaim {
 
 impl XstsResponse {
     pub fn user_hash(&self) -> Option<&str> {
-        self.display_claims
-            .xui
-            .first()
-            .map(|claim| claim.uhs.as_str())
+        Some("-")
     }
 }
 
@@ -64,7 +61,7 @@ pub struct XstsPropertyBag {
     pub service_token: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_tokens: Option<Vec<String>>,
+    pub device_token: Option<String>,
 
     #[serde(rename = "SandboxId", skip_serializing_if = "Option::is_none")]
     pub sandbox_id: Option<String>,

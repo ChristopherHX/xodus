@@ -18,6 +18,7 @@ use base64::Engine;
 use bytes::Bytes;
 use kryptering::random_bytes;
 use reqwest::{Client, StatusCode};
+use xal::{DeviceType, XalAppParameters, XalAuthenticator};
 
 pub async fn run(
     client: &reqwest::Client,
@@ -25,47 +26,47 @@ pub async fn run(
     legacy: LegacyToken,
     relying_party: &str,
 ) -> XstsResponse {
-    let user_token = crate::api::live::exchange_user_token(
+    let device_token_resp = crate::api::live::exchange_device_token(
         client,
-        legacy,
-        "USERNAME".to_string(),
-        dev_token,
-        None,
-        Some("Silent".to_string()),
-        "{d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_string(),
-        &[(
-            "user.auth.xboxlive.com".to_owned(),
-            Some(soap::PolicyReference::mbi_ssl()),
-        )],
+        dev_token.clone(),
+        "{28C08266-F973-4AE6-FFE4-409B249F138F}".to_string(),
+        "scope=service::user.auth.xboxlive.com::MBI_SSL".to_owned(),
+        Some(soap::PolicyReference::token_broker()),
     )
-    .await
-    .expect("Failed to get ms user token");
+    .await;
 
-    let user_token: Token = match user_token {
-        ExchangeUserTokenOutcome::Fault(_) => {
-            eprintln!("Failed to get exchange MS token");
-            panic!("TODO");
-        }
-        ExchangeUserTokenOutcome::Issued(
-            soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
-        ) => {
-            let token = collection.security_tokens.remove(0);
-            token.into()
-        }
-        ExchangeUserTokenOutcome::Issued(soap::BodyContent::RequestSecurityTokenResponse(
-            token,
-        )) => (*token).into(),
-        _ => unreachable!("Only responses are handled"),
+    let ms_device_rps_token = if let Some((Token::Compact(ms_device_token), Ok(lifetime))) =
+        device_token_resp.ok().map(|t| {
+            let expiry = chrono::DateTime::parse_from_rfc3339(&t.lifetime.expires);
+            (t.into(), expiry)
+        }) {
+        Some((ms_device_token, lifetime.timestamp()))
+    } else {
+        None
     };
-    let Token::Compact(user_token) = user_token else {
-        eprintln!("Unsupported token");
-        panic!("TODO");
-    };
-    let resp = authenticate_xbox_user(client, user_token)
-        .await
-        .expect("Failed to authenticate Xbox user");
 
-    request_xsts_token(client, resp.token, relying_party)
+        let mut auth = XalAuthenticator::new(
+        XalAppParameters {
+            client_id: "".to_owned(),
+            title_id: Some("".to_string()),
+            auth_scopes: vec![],
+            redirect_uri: None,
+            client_secret: None,
+        },
+        xal::XalClientParameters {
+            user_agent: "XAL GRTS 2025.11.20251105.000".to_string(),
+            device_type: DeviceType::WIN32,
+            client_version: "10.0.22621".to_string(),
+            query_display: String::new(),
+        },
+        "RETAIL".to_owned(),
+    );
+
+    let data = auth
+        .get_device_token_rps(ms_device_rps_token.unwrap().0.to_owned())
+        .await.unwrap();
+
+    request_xsts_token(client, data.token, relying_party)
         .await
         .expect("Failed to authenticate Xbox user")
 }

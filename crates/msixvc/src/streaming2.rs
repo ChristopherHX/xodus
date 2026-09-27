@@ -547,9 +547,10 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[ignore = "needs local file"]
 async fn test_read_fast3() -> Result<(), Box<dyn std::error::Error>> {
     stream_fast(FileReaderFactory {
-        path: "/Users/christopher/Documents/minecraft/xodus/StarTrucker.msixvc".to_owned(),
+        path: "StarTrucker.msixvc".to_owned(),
     })
     .await
 }

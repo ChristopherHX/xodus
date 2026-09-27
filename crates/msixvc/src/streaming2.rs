@@ -17,7 +17,7 @@ use tokio::time::timeout;
 use zerocopy::IntoBytes;
 
 use crate::layout::{PAGE_SIZE, Pages};
-use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, MAX_HASHED_PAGES, XvdLayout};
+use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, XvdLayout};
 use crate::models::xvd::{
     HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionSpecifier, XvdHashEntry, XvdHeader,
     XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader,
@@ -580,17 +580,19 @@ impl<'t> HashedReader<'t> {
         // hash index of l1 hash level
         let hash_pages_l1_index = hash_pages % HASH_ENTRIES_IN_PAGE;
         let hash_bytes_start = (layout.hash_tree.start
-                    + layout.hash_tree_layout.level0.page_range.start
-                    + Pages(hash_pages as u32))
-                .to_bytes()
-                .0 as usize;
+            + layout.hash_tree_layout.level0.page_range.start
+            + Pages(hash_pages as u32))
+        .to_bytes()
+        .0 as usize;
         let hash_reader = {
             let (hash_io, in_hash) = mpsc::channel::<Bytes>(100);
             reader.new(
                 hash_io,
                 hash_bytes_start,
                 // Check correctness
-                data_length.map_or(0, |v| hash_bytes_start + (v.0 as usize).div_ceil(HASH_ENTRIES_IN_PAGE) * 4096 - 1),
+                data_length.map_or(0, |v| {
+                    hash_bytes_start + (v.0 as usize).div_ceil(HASH_ENTRIES_IN_PAGE) * 4096 - 1
+                }),
             );
             ChannelReader {
                 in_prov_valid: in_hash,

@@ -57,14 +57,13 @@ fn file_reader(path: String, out_io: Sender<Bytes>, start: usize, end: usize) ->
             // Try to reclaim buffer from dequeue or reallocate
             let mut buf: BytesMut = b.pop_front().unwrap().into();
             let max_read = if end == 0 { buf.len() } else {
-                // assert!(end + 1 >= pos, "{} {pos}", end + 1);
-                min(if end + 1 >= pos { end + 1 - pos } else { 0 }, buf.len())
+                min(end + 1 - pos, buf.len())
             };
             if max_read == 0 {
                 // End of Substream
                 break;
             }
-            let r = f.read(&mut buf).unwrap();
+            let r = f.read(&mut buf[..max_read]).unwrap();
             let m: Bytes = buf.freeze();
             b.push_back(m.clone().split_to(r));
             pos += r;
@@ -362,14 +361,14 @@ async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn
 #[tokio::test]
 async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
     let c =  reqwest::Client::new();
-    let url = "http://assets1.xboxlive.com/11/a4d76fdf-087a-47a2-99a7-76a621eb4170/ab03f40c-e85d-467b-8c67-3870b89bd2d1/3.420.696.0.882e46cd-2099-4bee-a1df-052310b86c7a/Microsoft.ForteBaseGame_3.420.696.0_x64__8wekyb3d8bbwe.msixvc";
+    let url = "http://assets1.xboxlive.com/14/aa14a80d-58ae-492a-8a48-b9e5ae421187/1d4dfd7a-d46b-4eaa-b2d2-d855c95bbbd1/1.75.0.0.119fa092-373a-4e87-a067-e3c4f7efa433/RawFury.StarTrucker_1.75.0.0_x64__9s0pnehqffj7t.msixvc";
 
     stream_fast(HttpReaderFactory { client: c, url: url.to_owned() }).await
 }
 
 #[tokio::test]
 async fn test_read_fast3() -> Result<(), Box<dyn std::error::Error>>{
-    stream_fast(FileReaderFactory { path: "StarTrucker.msixvc".to_owned() }).await
+    stream_fast(FileReaderFactory { path: "/Users/christopher/Documents/minecraft/xodus/StarTrucker.msixvc".to_owned() }).await
 }
 
 fn read_full(in_prov_valid: &mut Receiver<Bytes>, data : &mut [u8], mut remaining_b: Option<Bytes>) -> Option<Bytes> {

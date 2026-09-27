@@ -247,7 +247,6 @@ where
                 let top_level = layout.hash_tree_layout.level3;
                 let second_level = layout.hash_tree_layout.level2;
                 let third_level = layout.hash_tree_layout.level1;
-                let forth_level = layout.hash_tree_layout.level0;
 
                 let l1_hashs = {
                     if top_level.is_top() {
@@ -280,40 +279,13 @@ where
                     }
                 };
 
-                let data_len = layout.user_data.len.0 as usize;
-                let pages_len = data_len.div_ceil(4096);
-                // div_ceil, since we need to validate the hash block and that works only by having them fully.
-                let hash_len_l0 = pages_len.div_ceil(HASH_ENTRIES_IN_PAGE) * 4096;
-
-                let mut hr = {
-                    let (out_hash, in_hash) = mpsc::channel::<Bytes>(100);
-                    reader.new(
-                        out_hash,
-                        (layout.hash_tree.start + forth_level.page_range.start)
-                            .to_bytes()
-                            .0 as usize,
-                        (layout.hash_tree.start + forth_level.page_range.start)
-                            .to_bytes()
-                            .0 as usize
-                            + hash_len_l0 as usize
-                            - 1,
-                    );
-
-                    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
-                    reader.new(out_io, target_offset, target_end.div_ceil(4096) * 4096);
-
-                    HashedReader::new(
-                        ChannelReader {
-                            in_prov_valid: in_prov_valid,
-                            remaining_b: None,
-                        },
-                        ChannelReader {
-                            in_prov_valid: in_hash,
-                            remaining_b: None,
-                        },
-                        &l1_hashs,
-                    )
-                };
+                let mut hr = HashedReader::new(
+                    &reader,
+                    &l1_hashs,
+                    &layout,
+                    Pages(target_offset.div(4096) as u32),
+                    Some(Pages(target_end.div_ceil(4096) as u32)),
+                );
 
                 let mut buf = XvdUserDataHeader::buffer();
                 hr.read_full(&mut buf);
@@ -414,60 +386,14 @@ where
                         }
                     }
                     println!("done {}", sfiles.len());
-                    // for (name, l, po, ps) in sfiles {
-                    //     println!("{name} {l}, {po}, {ps}")
-                    // }
+                    for (name, l, po, ps) in sfiles {
+                        println!("{name} {l}, {po}, {ps}")
+                    }
                 }
 
                 {
-                    let xvc_info_reader = {
-                        let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
-                        reader.new(out_io, layout.xvc_info.start.to_bytes().0 as usize, 0);
-                        ChannelReader {
-                            in_prov_valid: in_prov_valid,
-                            remaining_b: None,
-                        }
-                    };
-                    // absolute file page position where we load data
-                    let data_region_start = layout.xvc_info.start;
-                    // page offset relative to hashed region of l0
-                    let hash_region_loc = data_region_start - layout.user_data.start;
-                    // page offset relative to hashed region of l0
-                    let hash_region_loc_pages = hash_region_loc.0 as usize;
-                    // page offset in l0 hash level
-                    let hash_pages = hash_region_loc_pages.div(HASH_ENTRIES_IN_PAGE);
-                    // hash index of l0 hash level
-                    let hash_pages_index = hash_region_loc_pages % HASH_ENTRIES_IN_PAGE;
-                    // page offset in l1 hash level
-                    let hash_pages_l1 = hash_pages.div(HASH_ENTRIES_IN_PAGE);
-                    // hash index of l1 hash level
-                    let hash_pages_l1_index = hash_pages % HASH_ENTRIES_IN_PAGE;
-                    let hash_reader = {
-                        let (hash_io, in_hash) = mpsc::channel::<Bytes>(100);
-                        reader.new(
-                            hash_io,
-                            (layout.hash_tree.start + forth_level.page_range.start)
-                                .to_bytes()
-                                .0 as usize
-                                + hash_pages * 4096,
-                            0,
-                        );
-                        ChannelReader {
-                            in_prov_valid: in_hash,
-                            remaining_b: None,
-                        }
-                    };
-                    let mut xvc_info_reader = HashedReader {
-                        buffer: [0u8; 4096],
-                        hash_buffer: [0u8; 4096],
-                        hash_offset: hash_pages_index,
-                        buffered_len: 0,
-                        data_reader: xvc_info_reader,
-                        hash_reader: hash_reader,
-                        l1_hashs: &l1_hashs[4096 * hash_pages_l1..],
-                        l1_hash_offset: hash_pages_l1_index,
-                    };
-                    xvc_info_reader.fetch_next_l0_hash();
+                    let mut xvc_info_reader =
+                        HashedReader::new(&reader, &l1_hashs, &layout, layout.xvc_info.start, None);
                     let xvc_info = {
                         let mut buf = XvcInfo::buffer();
                         xvc_info_reader.read_full(&mut buf);
@@ -617,35 +543,73 @@ struct HashedReader<'t> {
 }
 
 impl<'t> HashedReader<'t> {
-    fn new(data_reader: ChannelReader, hash_reader: ChannelReader, l1_hashs: &'t [u8]) -> Self {
-        Self {
-            buffer: [0u8; 4096],
-            hash_buffer: [0u8; 4096],
-            hash_offset: HASH_ENTRIES_IN_PAGE,
-            buffered_len: 0,
-            data_reader: data_reader,
-            hash_reader: hash_reader,
-            l1_hashs,
-            l1_hash_offset: 0,
-        }
-    }
-    fn newExt(
-        data_reader: ChannelReader,
-        hash_reader: ChannelReader,
+    fn new<ReaderFactory>(
+        reader: &ReaderFactory,
         l1_hashs: &'t [u8],
         layout: &XvdLayout,
-        data_start: usize,
-    ) -> Self {
-        Self {
+        data_start: Pages,
+        data_length: Option<Pages>,
+    ) -> Self
+    where
+        ReaderFactory: RangeReaderFactory + Send + 'static,
+    {
+        let xvc_info_reader = {
+            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
+            reader.new(
+                out_io,
+                data_start.to_bytes().0 as usize,
+                data_length.map_or(0, |v| (data_start + v).to_bytes().0 as usize - 1),
+            );
+            ChannelReader {
+                in_prov_valid: in_prov_valid,
+                remaining_b: None,
+            }
+        };
+        // absolute file page position where we load data
+        let data_region_start = data_start;
+        // page offset relative to hashed region of l0
+        let hash_region_loc = data_region_start - layout.user_data.start;
+        // page offset relative to hashed region of l0
+        let hash_region_loc_pages = hash_region_loc.0 as usize;
+        // page offset in l0 hash level
+        let hash_pages = hash_region_loc_pages.div(HASH_ENTRIES_IN_PAGE);
+        // hash index of l0 hash level
+        let hash_pages_index = hash_region_loc_pages % HASH_ENTRIES_IN_PAGE;
+        // page offset in l1 hash level
+        let hash_pages_l1 = hash_pages.div(HASH_ENTRIES_IN_PAGE);
+        // hash index of l1 hash level
+        let hash_pages_l1_index = hash_pages % HASH_ENTRIES_IN_PAGE;
+        let hash_bytes_start = (layout.hash_tree.start
+                    + layout.hash_tree_layout.level0.page_range.start
+                    + Pages(hash_pages as u32))
+                .to_bytes()
+                .0 as usize;
+        let hash_reader = {
+            let (hash_io, in_hash) = mpsc::channel::<Bytes>(100);
+            reader.new(
+                hash_io,
+                hash_bytes_start,
+                // Check correctness
+                data_length.map_or(0, |v| hash_bytes_start + (v.0 as usize).div_ceil(HASH_ENTRIES_IN_PAGE) * 4096 - 1),
+            );
+            ChannelReader {
+                in_prov_valid: in_hash,
+                remaining_b: None,
+            }
+        };
+        let mut xvc_info_reader = Self {
             buffer: [0u8; 4096],
             hash_buffer: [0u8; 4096],
-            hash_offset: HASH_ENTRIES_IN_PAGE,
+            hash_offset: hash_pages_index,
             buffered_len: 0,
-            data_reader: data_reader,
+            data_reader: xvc_info_reader,
             hash_reader: hash_reader,
-            l1_hashs,
-            l1_hash_offset: 0,
-        }
+            l1_hashs: &l1_hashs[4096 * hash_pages_l1..],
+            l1_hash_offset: hash_pages_l1_index,
+        };
+        xvc_info_reader.fetch_next_l0_hash();
+
+        xvc_info_reader
     }
 
     fn read_full(&mut self, b: &mut [u8]) {

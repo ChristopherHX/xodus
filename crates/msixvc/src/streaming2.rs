@@ -5,13 +5,22 @@ use std::io::{Read, Write};
 use std::ops::Div;
 
 use bytes::{Buf, Bytes, BytesMut};
+use cms::cert::x509::der::{Decode, Encode};
+use cms::content_info::ContentInfo;
+use cms::signed_data::SignedData;
 use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
 use reqwest::Client;
 use reqwest::header::RANGE;
+use rsa::BigUint;
+use rsa::pkcs1v15::Signature;
+use rsa::sha2::digest::generic_array::GenericArray;
+use rsa::signature::Verifier;
 use sha2::Digest;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
+use x509_parser::asn1_rs::FromDer;
+use x509_parser::certificate::X509Certificate;
 use zerocopy::IntoBytes;
 
 use crate::layout::{PAGE_SIZE, Pages};
@@ -484,6 +493,52 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                             data.resize(data.capacity(), 0);
                             hr.read_full(&mut data);
                             println!("{}\n{}", file, String::from_utf8_lossy(&data));
+                        } else if file.ends_with("P7X") {
+                            let mut data =  Vec::with_capacity(s as usize);
+                            data.resize(data.capacity(), 0);
+                            hr.read_full(&mut data);
+                            // let mut o = File::create("/Users/christopher/Documents/minecraft/xodus/PKCS7.crt")?;
+                            // o.write_all(&data[4..])?;
+                            let ci = ContentInfo::from_der(&data[4..3944+4]).unwrap();
+                            let sd: SignedData = ci.content.decode_as().unwrap();
+                            for cert in sd.certificates.unwrap().0.into_vec() {
+                                let der = cert.to_der().unwrap();
+                                let (_, cert) = X509Certificate::from_der(&der).unwrap();
+                                println!("subject: {}", cert.subject());
+                                println!("issuer : {}", cert.issuer());
+                                let spki = &cert.tbs_certificate.subject_pki;
+                                println!("alg oid: {}", spki.algorithm.algorithm);
+                                println!("key len: {}", spki.subject_public_key.data.len());
+
+                                let key = spki.parsed().unwrap();
+                                match key {
+                                    x509_parser::public_key::PublicKey::RSA(rsapublic_key) => {
+                                        let vkey = rsa::pss::VerifyingKey::<rsa::sha2::Sha256>::new(rsa::RsaPublicKey::new(BigUint::from_bytes_be(rsapublic_key.modulus), BigUint::from_bytes_be(rsapublic_key.exponent)).unwrap());
+                                        let rdata: &[u8] = &xvd_header_buf;
+                                        let sig = rsa::pss::Signature::try_from(&xvd_header.signature[..]).unwrap();
+                                        match vkey.verify(&rdata[xvd_header.signature.len()..], &sig) {
+                                            Ok(_) => println!("Signed OK"),
+                                            Err(e) => println!("Signed Failed {e}"),
+                                        }
+                                        let vkey = rsa::pkcs1v15::VerifyingKey::<rsa::sha2::Sha256>::new(rsa::RsaPublicKey::new(BigUint::from_bytes_be(rsapublic_key.modulus), BigUint::from_bytes_be(rsapublic_key.exponent)).unwrap());
+                                        let sig = rsa::pkcs1v15::Signature::try_from(&xvd_header.signature[..]).unwrap();
+
+                                        match vkey.verify(&rdata[xvd_header.signature.len()..], &sig) {
+                                            Ok(_) => println!("Signed OK"),
+                                            Err(e) => println!("Signed Failed {e}"),
+                                        };
+                                        // println!("sig bytes");
+                                        // println!("{:x}", GenericArray::from_slice(&xvd_header.signature));
+                                        // let digest = sha2::Sha256::digest(
+                                        //     &rdata[xvd_header.signature.len()..]
+                                        // );
+                                        // println!("data digest");
+                                        // let s: &[u8] = &digest;
+                                        // println!("{:x}", GenericArray::from_slice(s));
+                                    },
+                                    _ => unimplemented!(),
+                                }
+                            }
                         } else {
                             hr.read_full_discard(s as usize);
                         }

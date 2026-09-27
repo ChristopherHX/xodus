@@ -15,8 +15,8 @@ use tokio::task::JoinHandle;
 use zerocopy::IntoBytes;
 
 use crate::layout::{PAGE_SIZE, Pages};
-use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, MAX_HASHED_PAGES};
-use crate::models::xvd::{HASH_ENTRIES_IN_PAGE, XvcRegionHeader, XvdHashEntry, XvdHeader, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader};
+use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, MAX_HASHED_PAGES, XvdLayout};
+use crate::models::xvd::{HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionFlags, XvcRegionHeader, XvcRegionSpecifier, XvdHashEntry, XvdHeader, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader};
 use crate::xvd::UserPackageFile;
 
 pub async fn download() -> Result<(), Box<dyn std::error::Error>> {
@@ -382,34 +382,6 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                 http_reader(c2.clone(), url.to_owned(), out_io.clone(), target_offset, target_end.div_ceil(4096)*4096);
 
                 let mut hr = HashedReader::new(ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }, ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None }, &l0_hashs);
-                
-                // let mut buf = [0u8; 8190];
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-                // hr.read_full(&mut buf);
-
-                // todo!("wtf");
 
                 let mut buf = XvdUserDataHeader::buffer();
                 hr.read_full(&mut buf);
@@ -493,6 +465,87 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                     //     println!("{name} {l}, {po}, {ps}")
                     // }
                 }
+
+                {
+                    let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
+                    let mut xvc_info_reader = {
+                        http_reader(c2.clone(), url.to_owned(), out_io.clone(), layout.xvc_info.start.to_bytes().0 as usize, 0);
+                        ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }
+                    };
+                    // absolute file position where we load data
+                    let data_region_start = layout.xvc_info.start;
+                    // byte offset relative to hashed region of l0
+                    let hash_region_loc = data_region_start - layout.user_data.start;
+                    // page offset relative to hashed region of l0
+                    let hash_region_loc_pages = hash_region_loc.0 as usize;
+                    // page offset in l0 hash level
+                    let hash_pages = hash_region_loc_pages.div(HASH_ENTRIES_IN_PAGE);
+                    // hash index of l0 hash level
+                    let hash_pages_index = hash_region_loc_pages % HASH_ENTRIES_IN_PAGE;
+                    // page offset in l1 hash level
+                    let hash_pages_l1 = hash_pages.div(HASH_ENTRIES_IN_PAGE);
+                    // hash index of l1 hash level
+                    let hash_pages_l1_index = hash_pages % HASH_ENTRIES_IN_PAGE;
+                    let (hash_io, mut in_hash) = mpsc::channel::<Bytes>(100);
+                    let hash_reader = {
+                        http_reader(c2.clone(), url.to_owned(), hash_io, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_pages * 4096, 0);
+                        ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None }
+                    };
+                    let mut xvc_info_reader = HashedReader {
+                        buffer: [0u8; 4096],
+                        hash_buffer: [0u8; 4096],
+                        hash_offset: hash_pages_index,
+                        buffered_len: 0,
+                        data_reader: xvc_info_reader,
+                        hash_reader: hash_reader,
+                        l1_hashs: &l0_hashs[4096 * hash_pages_l1..],
+                        l1_hash_offset: hash_pages_l1_index,
+                    };
+                    xvc_info_reader.fetch_next_l0_hash();
+                    let xvc_info = {
+                        let mut buf = XvcInfo::buffer();
+                        xvc_info_reader.read_full(&mut buf);
+                        XvcInfo::from_array(&buf)
+                    };
+                    let region_count = xvc_info.region_count;
+                    let mut region_headers: Vec<XvcRegionHeader> = Vec::with_capacity(region_count as usize);
+                    let mut region_specs: Vec<XvcRegionSpecifier> = Vec::with_capacity(xvc_info.region_specifier_count as usize);
+                    let mut region_flags: Vec<u32> = Vec::with_capacity(region_count as usize);
+                    if xvc_info.version >= 1 {
+                        let mut buf = XvcRegionHeader::buffer();
+                        for _ in 0..region_count {
+                            xvc_info_reader.read_full(&mut buf);
+                            let region_header = XvcRegionHeader::try_from_array(&buf)?;
+                            region_headers.push(region_header);
+                        }
+                        xvc_info_reader.read_full_discard((xvc_info.update_segment_count * 12) as usize);
+                        let mut buf = XvcRegionSpecifier::buffer();
+                        for _ in 0..xvc_info.region_specifier_count {
+                            xvc_info_reader.read_full(&mut buf);
+                            let region_spec = XvcRegionSpecifier::from_array(&buf);
+                            region_specs.push(region_spec);
+                        }
+                        if layout.mutable_data.len.0 > 0 {
+                            let mut buf = [0u8; 1];
+                            for _ in 0..region_count {
+                                xvc_info_reader.read_full(&mut buf);
+                                region_flags.push(buf[0] as u32);
+                            }
+                        }
+                    }
+
+                    for (r, f) in region_headers.iter().zip(region_flags) {
+                        let c = r.description.iter().take_while(|c| **c != 0).count();
+                        // r.flags.
+                        // r.region_id.to_le_bytes()
+                        println!("Region: {} {:?} {:x}", String::from_utf16(&r.description[0..c]).unwrap(), r.flags, f);
+                        for s in region_specs.iter().filter(|s| r.region_id == s.region_id) {
+                            let kl = s.key.iter().take_while(|c| **c != 0).count();
+                            let vl = s.value.iter().take_while(|c| **c != 0).count();
+                            println!(" {} {}", String::from_utf16(&s.key[..kl]).unwrap(), String::from_utf16(&s.value[..vl]).unwrap());
+                        }
+                    }
+                }
                 Ok(())
             })().unwrap();
         }));
@@ -554,8 +607,8 @@ struct HashedReader<'t> {
     hash_reader: ChannelReader<'t>,
     hash_buffer: [u8; 4096],
     hash_offset: usize,
-    l0_hashs: &'t [u8],
-    l0_hash_offset: usize,
+    l1_hashs: &'t [u8],
+    l1_hash_offset: usize,
 }
 
 impl<'t> HashedReader<'t> {
@@ -567,13 +620,26 @@ impl<'t> HashedReader<'t> {
             buffered_len: 0,
             data_reader: data_reader,
             hash_reader: hash_reader,
-            l0_hashs: l0_hashs,
-            l0_hash_offset: 0,
+            l1_hashs: l0_hashs,
+            l1_hash_offset: 0,
+        }
+    }
+    fn newExt(data_reader: ChannelReader<'t>, hash_reader: ChannelReader<'t>, l0_hashs: &'t [u8], layout: &XvdLayout, data_start: usize) -> Self {
+        Self {
+            buffer: [0u8; 4096],
+            hash_buffer: [0u8; 4096],
+            hash_offset: HASH_ENTRIES_IN_PAGE,
+            buffered_len: 0,
+            data_reader: data_reader,
+            hash_reader: hash_reader,
+            l1_hashs: l0_hashs,
+            l1_hash_offset: 0,
         }
     }
 
+
     fn read_full(&mut self, b: &mut [u8]) {
-        // we need to read ahead here by 4096 pages
+        // we need to read ahead here by 4096 bytes
         let max_len = b.len();
         let buffered_len = self.buffered_len;
         let buffered_end = min(max_len, buffered_len);
@@ -594,46 +660,13 @@ impl<'t> HashedReader<'t> {
                 self.buffered_len = 0;
             }
 
-            // meh...
-            // for (i, c) in (0..hash_cnt).flat_map(|i| {
-            //     if i == 0 && self.hash_offset < HASH_ENTRIES_IN_PAGE {
-            //         self.hash_buffer.chunks_exact(HASH_ENTRY_LENGTH).skip(self.hash_offset)
-            //     } else {
-            //         // let b = self.hash_buffer_b.try_into_mut().unwrap();
-            //         // self.hash_reader.read_full(&mut self.hash_buffer);
-            //         self.hash_buffer.chunks_exact(HASH_ENTRY_LENGTH).skip(0)
-            //     }
-            // }).take(hash_cnt).map(XvdHashEntry::from_slice).enumerate() {
-            //     // verify
-            //     let mut sha = sha2::Sha256::new();
-            //     sha.update(&b[buffered_end + i * 4096..(i + 1) * 4096]);
-            //     if sha.finalize()[0..20] != c.block_hash {
-            //         panic!("TODO");
-            //     }
-            // }
             for i in 0..hash_cnt {
                 let c = XvdHashEntry::from_slice(if self.hash_offset < HASH_ENTRIES_IN_PAGE {
                     let item = &self.hash_buffer[self.hash_offset*HASH_ENTRY_LENGTH..(self.hash_offset+1)*HASH_ENTRY_LENGTH];
                     self.hash_offset += 1;
                     item
                 } else {
-                    self.hash_reader.read_full(&mut self.hash_buffer);
-                    // check this hash
-                    if self.l0_hash_offset >= HASH_ENTRIES_IN_PAGE {
-                        self.l0_hash_offset = 0;
-                        self.l0_hashs = &self.l0_hashs[4096..];
-                    }
-                    let c = XvdHashEntry::from_slice({
-                        let item = &self.l0_hashs[self.l0_hash_offset*HASH_ENTRY_LENGTH..(self.l0_hash_offset+1)*HASH_ENTRY_LENGTH];
-                        self.l0_hash_offset += 1;
-                        item
-                    });
-                    let mut sha = sha2::Sha256::new();
-                    sha.update(&self.hash_buffer);
-                    if sha.finalize()[0..20] != c.block_hash {
-                        panic!("SHA Mismatch HT!");
-                    }
-
+                    self.fetch_next_l0_hash();
                     let item = &self.hash_buffer[0..HASH_ENTRY_LENGTH];
                     self.hash_offset = 1;
                     item
@@ -661,23 +694,22 @@ impl<'t> HashedReader<'t> {
         }
         self.read_full(&mut discard_buf[0..l % bz]);
     }
+    fn fetch_next_l0_hash(&mut self) {
+        self.hash_reader.read_full(&mut self.hash_buffer);
+        // check this hash
+        if self.l1_hash_offset >= HASH_ENTRIES_IN_PAGE {
+            self.l1_hash_offset = 0;
+            self.l1_hashs = &self.l1_hashs[4096..];
+        }
+        let c = XvdHashEntry::from_slice({
+            let item = &self.l1_hashs[self.l1_hash_offset*HASH_ENTRY_LENGTH..(self.l1_hash_offset+1)*HASH_ENTRY_LENGTH];
+            self.l1_hash_offset += 1;
+            item
+        });
+        let mut sha = sha2::Sha256::new();
+        sha.update(&self.hash_buffer);
+        if sha.finalize()[0..20] != c.block_hash {
+            panic!("SHA Mismatch HT!");
+        }
+    }
 }
-
-// impl<'t> Iterator for HashedReader<'t> {
-//     type Item = &'t [u8];
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         if self.hash_offset < HASH_ENTRIES_IN_PAGE {
-//             let item = &self.hash_buffer[self.hash_offset*HASH_ENTRY_LENGTH..(self.hash_offset+1)*HASH_ENTRY_LENGTH];
-//             self.hash_offset += 1;
-//             Some(item)
-//         } else {
-//             // let b = self.hash_buffer_b.try_into_mut().unwrap();
-//             // self.hash_reader.read_full(&mut self.hash_buffer);
-//             let item = &self.hash_buffer[0..HASH_ENTRY_LENGTH];
-//             self.hash_offset = 0;
-//             Some(item)
-
-//         }
-//     }
-// }

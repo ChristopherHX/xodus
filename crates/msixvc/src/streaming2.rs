@@ -75,11 +75,11 @@ fn file_reader(path: String, out_io: Sender<Bytes>, start: usize, end: usize) ->
     })
 }
 
-trait RangeReaderFactory {
+pub trait RangeReaderFactory {
     fn new(&self, out_io: Sender<Bytes>, start: usize, end: usize) -> JoinHandle<()>;
 }
 
-struct FileReaderFactory {
+pub struct FileReaderFactory {
     path: String,
 }
 
@@ -89,7 +89,7 @@ impl RangeReaderFactory for FileReaderFactory {
     }
 }
 
-struct HttpReaderFactory {
+pub struct HttpReaderFactory {
     client: Client,
     url: String,
 }
@@ -134,7 +134,7 @@ fn fetch_and_verify_hash_level<ReaderFactory>(reader: &ReaderFactory, layout: &X
     l2_hashs
 }
 
-async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn std::error::Error>>
+pub async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn std::error::Error>>
     where ReaderFactory: RangeReaderFactory + Send + 'static
 {
     let mut tasks = Vec::new();
@@ -219,7 +219,8 @@ async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn
                         files.push((pfull_name, o, s));
                     }
                     for (file, o, s) in files {
-                        // println!("Read {}", file);
+                        // TODO assert we are currently at position o
+                        let _ = o;
                         if file.ends_with("SegmentMetadata.bin") {
                             // let mut data =  Vec::with_capacity(s as usize);
                             // data.resize(data.capacity(), 0);
@@ -231,6 +232,9 @@ async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn
                             let paths_offset =
                                 segment_header.header_length as u64 + segment_header.segment_count as u64 * 0x10;
 
+                            // TODO add asserts for resilence against attacks that are not covered by hash verification
+                            let _ = paths_offset;
+                            
                             let mut segments = Vec::with_capacity(segment_header.segment_count as usize);
                             let mut buf = XvdSegmentMetadataSegment::buffer();
                             for _ in 0..segment_header.segment_count {

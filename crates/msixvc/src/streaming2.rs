@@ -313,17 +313,13 @@ impl RangeReaderFactory for HttpReaderFactory {
     }
 }
 
-
-#[tokio::test]
-async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
-    let c =  reqwest::Client::new();
-    let url = "http://assets1.xboxlive.com/11/a4d76fdf-087a-47a2-99a7-76a621eb4170/ab03f40c-e85d-467b-8c67-3870b89bd2d1/3.420.696.0.882e46cd-2099-4bee-a1df-052310b86c7a/Microsoft.ForteBaseGame_3.420.696.0_x64__8wekyb3d8bbwe.msixvc";
-
+async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<(), Box<dyn std::error::Error>>
+    where ReaderFactory: RangeReaderFactory + Send + 'static
+{
     let mut tasks = Vec::new();
     {
         let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-        tasks.push(http_reader(c.clone(), url.to_owned(), out_io.clone(), 0, 4096));
-        let c2 = c.clone();
+        tasks.push(reader.new(out_io.clone(), 0, 4096));
         tasks.push(tokio::task::spawn_blocking(move ||{
             (|| -> Result<(), Box<dyn std::error::Error>> {
                 let mut xvd_header_buf = XvdHeader::buffer();
@@ -346,52 +342,38 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                 let forth_level = layout.hash_tree_layout.level0;
 
                 let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-                http_reader(c2.clone(), url.to_owned(), out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + top_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + top_level.page_range.end.to_bytes().0 as usize - 1);
-                let mut l2_hashs = [0u8; 4096];
-                remaining_b = read_full(&mut in_prov_valid, &mut l2_hashs, None);
+                reader.new(out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + top_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + top_level.page_range.end.to_bytes().0 as usize - 1);
+                let mut l3_hashs = [0u8; 4096];
+                remaining_b = read_full(&mut in_prov_valid, &mut l3_hashs, None);
                 let mut sha = sha2::Sha256::new();
-                sha.update(l2_hashs);
+                sha.update(l3_hashs);
                 if sha.finalize()[0..32] != xvd_header.top_hash_block_hash {
                     panic!("TODO");
                 }
 
                 let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-                http_reader(c2.clone(), url.to_owned(), out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.end.to_bytes().0 as usize - 1);
+                reader.new(out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + second_level.page_range.end.to_bytes().0 as usize - 1);
+
+                let mut l2_hashs = Vec::with_capacity(second_level.num_pages().to_bytes().0 as usize);
+                l2_hashs.resize(l2_hashs.capacity(), 0u8);
+                remaining_b = read_full(&mut in_prov_valid, &mut l2_hashs, None);
+                for (i, c) in l3_hashs.chunks_exact(HASH_ENTRY_LENGTH).take(second_level.num_pages().0 as usize).map(XvdHashEntry::from_slice).enumerate() {
+                    let mut sha = sha2::Sha256::new();
+                    sha.update(&l2_hashs[i * 4096..(i + 1) * 4096]);
+                    if sha.finalize()[0..20] != c.block_hash {
+                        panic!("TODO");
+                    }
+                }
+
+                let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
+                reader.new(out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + third_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + third_level.page_range.end.to_bytes().0 as usize - 1);
 
                 let mut l1_hashs = Vec::with_capacity(second_level.num_pages().to_bytes().0 as usize);
                 l1_hashs.resize(l1_hashs.capacity(), 0u8);
                 remaining_b = read_full(&mut in_prov_valid, &mut l1_hashs, None);
-                for (i, c) in l2_hashs.chunks_exact(HASH_ENTRY_LENGTH).take(second_level.num_pages().0 as usize).map(XvdHashEntry::from_slice).enumerate() {
+                for (i, c) in l2_hashs.chunks_exact(4096).flat_map(|p| p.chunks_exact(HASH_ENTRY_LENGTH)).take(second_level.num_pages().0 as usize).map(XvdHashEntry::from_slice).enumerate() {
                     let mut sha = sha2::Sha256::new();
                     sha.update(&l1_hashs[i * 4096..(i + 1) * 4096]);
-                    if sha.finalize()[0..20] != c.block_hash {
-                        panic!("TODO");
-                    }
-                }
-
-                let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-                http_reader(c2.clone(), url.to_owned(), out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + third_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + third_level.page_range.end.to_bytes().0 as usize - 1);
-
-                let mut l0_hashs = Vec::with_capacity(second_level.num_pages().to_bytes().0 as usize);
-                l0_hashs.resize(l0_hashs.capacity(), 0u8);
-                remaining_b = read_full(&mut in_prov_valid, &mut l0_hashs, None);
-                for (i, c) in l1_hashs.chunks_exact(4096).flat_map(|p| p.chunks_exact(HASH_ENTRY_LENGTH)).take(second_level.num_pages().0 as usize).map(XvdHashEntry::from_slice).enumerate() {
-                    let mut sha = sha2::Sha256::new();
-                    sha.update(&l0_hashs[i * 4096..(i + 1) * 4096]);
-                    if sha.finalize()[0..20] != c.block_hash {
-                        panic!("TODO");
-                    }
-                }
-
-                let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-                http_reader(c2.clone(), url.to_owned(), out_io.clone(), layout.hash_tree.start.to_bytes().0 as usize + third_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + third_level.page_range.end.to_bytes().0 as usize - 1);
-
-                let mut l0_hashs = Vec::with_capacity(second_level.num_pages().to_bytes().0 as usize);
-                l0_hashs.resize(l0_hashs.capacity(), 0u8);
-                remaining_b = read_full(&mut in_prov_valid, &mut l0_hashs, None);
-                for (i, c) in l1_hashs.chunks_exact(4096).flat_map(|p| p.chunks_exact(HASH_ENTRY_LENGTH)).take(second_level.num_pages().0 as usize).map(XvdHashEntry::from_slice).enumerate() {
-                    let mut sha = sha2::Sha256::new();
-                    sha.update(&l0_hashs[i * 4096..(i + 1) * 4096]);
                     if sha.finalize()[0..20] != c.block_hash {
                         panic!("TODO");
                     }
@@ -402,12 +384,12 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                 // div_ceil, since we need to validate the hash block and that works only by having them fully.
                 let hash_len_l0 = pages_len.div_ceil(HASH_ENTRIES_IN_PAGE) * 4096;
                 let (out_hash, mut in_hash) = mpsc::channel::<Bytes>(100);
-                http_reader(c2.clone(), url.to_owned(), out_hash.clone(), layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_len_l0 as usize - 1);
+                reader.new(out_hash.clone(), layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_len_l0 as usize - 1);
 
                 let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-                http_reader(c2.clone(), url.to_owned(), out_io.clone(), target_offset, target_end.div_ceil(4096)*4096);
+                reader.new(out_io.clone(), target_offset, target_end.div_ceil(4096)*4096);
 
-                let mut hr = HashedReader::new(ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }, ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None }, &l0_hashs);
+                let mut hr = HashedReader::new(ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }, ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None }, &l1_hashs);
 
                 let mut buf = XvdUserDataHeader::buffer();
                 hr.read_full(&mut buf);
@@ -493,7 +475,7 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                 {
                     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
                     let mut xvc_info_reader = {
-                        http_reader(c2.clone(), url.to_owned(), out_io.clone(), layout.xvc_info.start.to_bytes().0 as usize, 0);
+                        reader.new(out_io.clone(), layout.xvc_info.start.to_bytes().0 as usize, 0);
                         ChannelReader { in_prov_valid: &mut in_prov_valid, remaining_b: None }
                     };
                     // absolute file page position where we load data
@@ -512,7 +494,7 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                     let hash_pages_l1_index = hash_pages % HASH_ENTRIES_IN_PAGE;
                     let (hash_io, mut in_hash) = mpsc::channel::<Bytes>(100);
                     let hash_reader = {
-                        http_reader(c2.clone(), url.to_owned(), hash_io, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_pages * 4096, 0);
+                        reader.new(hash_io, layout.hash_tree.start.to_bytes().0 as usize + forth_level.page_range.start.to_bytes().0 as usize + hash_pages * 4096, 0);
                         ChannelReader { in_prov_valid: &mut in_hash, remaining_b: None }
                     };
                     let mut xvc_info_reader = HashedReader {
@@ -522,7 +504,7 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                         buffered_len: 0,
                         data_reader: xvc_info_reader,
                         hash_reader: hash_reader,
-                        l1_hashs: &l0_hashs[4096 * hash_pages_l1..],
+                        l1_hashs: &l1_hashs[4096 * hash_pages_l1..],
                         l1_hash_offset: hash_pages_l1_index,
                     };
                     xvc_info_reader.fetch_next_l0_hash();
@@ -578,6 +560,18 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
     Ok(())
 }
 
+#[tokio::test]
+async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
+    let c =  reqwest::Client::new();
+    let url = "http://assets1.xboxlive.com/11/a4d76fdf-087a-47a2-99a7-76a621eb4170/ab03f40c-e85d-467b-8c67-3870b89bd2d1/3.420.696.0.882e46cd-2099-4bee-a1df-052310b86c7a/Microsoft.ForteBaseGame_3.420.696.0_x64__8wekyb3d8bbwe.msixvc";
+
+    stream_fast(HttpReaderFactory { client: c, url: url.to_owned() }).await
+}
+
+#[tokio::test]
+async fn test_read_fast3() -> Result<(), Box<dyn std::error::Error>>{
+    stream_fast(FileReaderFactory { path: "StarTrucker.msixvc".to_owned() }).await
+}
 
 fn read_full(in_prov_valid: &mut Receiver<Bytes>, data : &mut [u8], mut remaining_b: Option<Bytes>) -> Option<Bytes> {
     let mut offset = 0;

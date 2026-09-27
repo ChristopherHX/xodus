@@ -432,10 +432,8 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>>{
                             }
 
                             let mut page_offset = 0;
-                            let sl = segments.len();
 
                             for segment in segments {
-                                // println!("{}/{}", sfiles.len(), sl);
                                 let s = segment.path_length;
                                 let mut buf = vec![0u16, 0];
                                 buf.resize(s as usize, 0);

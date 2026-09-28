@@ -624,14 +624,9 @@ impl<'t> HashedReader<'t> {
             // buffer to 4096 blocks
             let d_l = max_len - buffered_end;
             let hash_cnt = d_l.div_ceil(4096);
-            let buf_len = hash_cnt * 4096;
-            if max_len < buf_len {
-                self.buffered_len = buf_len - d_l;
-                self.data_reader
-                    .read_full(&mut self.buffer[4096 - self.buffered_len..4096]);
-            } else {
-                self.buffered_len = 0;
-            }
+            self.buffered_len = 4096 - (d_l % 4096);
+            self.data_reader
+                .read_full(&mut self.buffer[4096 - self.buffered_len..4096]);
 
             for i in 0..hash_cnt {
                 let c = XvdHashEntry::from_slice(if self.hash_offset < HASH_ENTRIES_IN_PAGE {
@@ -650,6 +645,7 @@ impl<'t> HashedReader<'t> {
                 if i + 1 < hash_cnt {
                     sha.update(&b[buffered_end + i * 4096..buffered_end + (i + 1) * 4096]);
                 } else {
+                    assert!(((max_len - (buffered_end + i * 4096) + self.buffered_len) == 4096), "BUG! we need a 4096 block");
                     sha.update(&b[buffered_end + i * 4096..max_len]);
                     sha.update(&self.buffer[4096 - self.buffered_len..4096]);
                 }
@@ -660,7 +656,7 @@ impl<'t> HashedReader<'t> {
         }
     }
     fn read_full_discard(&mut self, l: usize) {
-        let mut discard_buf = [0u8; 4096 * 4];
+        let mut discard_buf = [0u8; 4096 * 8];
         let bz = discard_buf.len();
         let end = l.div(bz);
         for _ in 0..end {

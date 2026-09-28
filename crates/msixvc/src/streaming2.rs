@@ -1,11 +1,13 @@
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Div;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aes::cipher::KeyInit;
+use aes::{Aes128Dec, Aes128Enc};
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
@@ -17,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use zerocopy::IntoBytes;
 
+use crate::crypt::{TweakGenerator, decrypt_page_xts};
 use crate::layout::{PAGE_SIZE, Pages};
 use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, XvdLayout};
 use crate::models::xvd::{
@@ -137,7 +140,7 @@ pub trait RangeReaderFactory {
 }
 
 pub struct FileReaderFactory {
-    path: String,
+    pub path: String,
 }
 
 impl RangeReaderFactory for FileReaderFactory {
@@ -147,8 +150,8 @@ impl RangeReaderFactory for FileReaderFactory {
 }
 
 pub struct HttpReaderFactory {
-    client: Client,
-    urls: Vec<String>,
+    pub client: Client,
+    pub urls: Vec<String>,
 }
 
 impl RangeReaderFactory for HttpReaderFactory {
@@ -229,6 +232,7 @@ where
 
 pub struct Package {
     pub xvd_header: XvdHeader,
+    pub hashes: Arc<Vec<u8>>,
     pub package_full_name: String,
     pub xvc_info: XvcInfo,
     pub sfiles: Vec<(String, u64, u64, u64)>,
@@ -246,7 +250,7 @@ impl Package {
         }
         for (r, f) in self.region_headers.iter().zip(&self.region_flags) {
             let c = r.description.iter().take_while(|c| **c != 0).count();
-            
+
             println!(
                 "Region: {:x} {} {:?} {:x}",
                 u32::from_le_bytes(r.region_id.to_le_bytes()),
@@ -254,7 +258,11 @@ impl Package {
                 r.flags,
                 f
             );
-            for s in self.region_specs.iter().filter(|s| r.region_id == s.region_id) {
+            for s in self
+                .region_specs
+                .iter()
+                .filter(|s| r.region_id == s.region_id)
+            {
                 let kl = s.key.iter().take_while(|c| **c != 0).count();
                 let vl = s.value.iter().take_while(|c| **c != 0).count();
                 println!(
@@ -263,6 +271,66 @@ impl Package {
                     String::from_utf16(&s.value[..vl]).unwrap_or_else(|_| "<error>".to_owned()),
                 );
             }
+        }
+    }
+
+    pub async fn download<ReaderFactory>(
+        &self,
+        reader: ReaderFactory,
+        file_name: String,
+        full_key: Option<[u8; 32]>,
+    ) where
+        ReaderFactory: RangeReaderFactory + Send + 'static,
+    {
+        let hashes = self.hashes.clone();
+        let layout = self.xvd_header.layout();
+        let header = self.xvd_header.clone();
+        for (i, (entry, bs, o, ps)) in (&self.sfiles).iter().enumerate() {
+            if *entry != file_name {
+                continue;
+            }
+            let o = *o;
+            let ps = *ps;
+            let bs = *bs;
+            // let region = self
+            //     .region_headers
+            //     .iter()
+            //     .find(|h| {
+            //         h.offset.to_bytes().0 >= o && (h.offset + h.length).to_bytes().0 <= o + ps
+            //     })
+            //     .cloned();
+            let region = self
+                .region_headers
+                .iter()
+                .filter(|h| (h.first_segment_index as usize) < i)
+                .last()
+                .cloned()
+                .unwrap();
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut fout = File::create(&file_name).unwrap();
+                let mut hr = HashedReader::new(
+                    &reader,
+                    &hashes,
+                    &layout,
+                    region.offset + Pages(o as u32),
+                    Some(Pages(ps as u32)),
+                );
+                hr.decryption =
+                    full_key.map(|full_key| DecryptionsRuntime::new(&header, &region, full_key));
+                let mut buf = [0u8; 4096];
+                let mut written = 0;
+                while written < ps {
+                    hr.read_full(&mut buf);
+                    fout.write_all(&buf).unwrap();
+                    written += 1;
+                }
+                // if full_key.is_some() {
+                fout.set_len(bs).unwrap();
+                // }
+                fout.sync_all().unwrap();
+            })
+            .await;
+            return;
         }
     }
 }
@@ -339,7 +407,10 @@ where
             hr.read_full(&mut buf);
             let user_data_header = XvdUserDataHeader::from_array(&buf);
             if user_data_header.t != 0 {
-                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "error")));
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "error",
+                )));
             }
             let mut sfiles = Vec::new();
             let mut package_files = HashMap::<String, String>::new();
@@ -349,16 +420,15 @@ where
                 hr.read_full(&mut buf);
                 let user_data_package_files_header =
                     XvdUserDataPackageFilesHeader::from_array(&buf);
-                let package_full_name = 
-                    String::from_utf16(
-                        &user_data_package_files_header.package_full_name[0
-                            ..user_data_package_files_header
-                                .package_full_name
-                                .iter()
-                                .enumerate()
-                                .find_map(|(i, c)| if *c == 0 { Some(i) } else { None })
-                                .unwrap_or(0)],
-                    )?;
+                let package_full_name = String::from_utf16(
+                    &user_data_package_files_header.package_full_name[0
+                        ..user_data_package_files_header
+                            .package_full_name
+                            .iter()
+                            .enumerate()
+                            .find_map(|(i, c)| if *c == 0 { Some(i) } else { None })
+                            .unwrap_or(0)],
+                )?;
                 let mut buf = XvdUserDataPackageFileEntry::buffer();
                 let mut files = Vec::new();
                 for _ in 0..user_data_package_files_header.file_count {
@@ -427,7 +497,10 @@ where
             };
 
             if layout.xvc_info.len.0 == 0 {
-                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "error")));
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "error",
+                )));
             }
             let (xvc_info, region_headers, region_specs, region_flags) = {
                 let xvc_info = {
@@ -468,6 +541,7 @@ where
             };
             Ok(Package {
                 xvd_header,
+                hashes: l1_hashs,
                 package_full_name,
                 sfiles,
                 xvc_info,
@@ -493,7 +567,8 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>> {
         client: c,
         urls: vec![url1.to_owned(), url2.to_owned()],
     })
-    .await?.dump();
+    .await?
+    .dump();
     Ok(())
 }
 
@@ -503,7 +578,8 @@ async fn test_read_fast3() -> Result<(), Box<dyn std::error::Error>> {
     stream_fast(FileReaderFactory {
         path: "StarTrucker.msixvc".to_owned(),
     })
-    .await?.dump();
+    .await?
+    .dump();
     Ok(())
 }
 
@@ -538,6 +614,31 @@ impl ChannelReader {
     }
 }
 
+struct DecryptionsRuntime {
+    tweak: TweakGenerator,
+    tweak_cipher: Aes128Enc,
+    data_cipher: Aes128Dec,
+}
+
+impl DecryptionsRuntime {
+    pub fn new(header: &XvdHeader, region_header: &XvcRegionHeader, full_key: [u8; 32]) -> Self {
+        let mut tweak_key = [0u8; 16];
+        let mut data_key = [0u8; 16];
+        tweak_key.copy_from_slice(&full_key[..16]);
+        data_key.copy_from_slice(&full_key[16..]);
+        Self {
+            tweak: TweakGenerator::new(region_header.region_id, header.vduid),
+            tweak_cipher: Aes128Enc::new((&tweak_key).into()),
+            data_cipher: Aes128Dec::new((&data_key).into()),
+        }
+    }
+
+    pub fn decrypt(&self, page: &mut [u8; 4096], data_unit: u32) {
+        let tweak = self.tweak.with_data_unit(data_unit);
+        decrypt_page_xts(page, tweak, &self.tweak_cipher, &self.data_cipher);
+    }
+}
+
 struct HashedReader<'t> {
     buffer: [u8; 4096],
     buffered_len: usize,
@@ -548,6 +649,7 @@ struct HashedReader<'t> {
     l1_hashs: &'t [u8],
     l1_hash_offset: usize,
     stream_pos: usize,
+    decryption: Option<DecryptionsRuntime>,
 }
 
 impl<'t> HashedReader<'t> {
@@ -617,6 +719,7 @@ impl<'t> HashedReader<'t> {
             l1_hashs: &l1_hashs[4096 * hash_pages_l1..],
             l1_hash_offset: hash_pages_l1_index,
             stream_pos: data_start.to_bytes().0 as usize,
+            decryption: None,
         };
         xvc_info_reader.fetch_next_l0_hash();
 
@@ -639,7 +742,7 @@ impl<'t> HashedReader<'t> {
             // buffer to 4096 blocks
             let d_l = max_len - buffered_end;
             let hash_cnt = d_l.div_ceil(4096);
-            self.buffered_len = 4096 - (d_l % 4096);
+            self.buffered_len = (4096 - (d_l % 4096)) % 4096;
             self.data_reader
                 .read_full(&mut self.buffer[4096 - self.buffered_len..4096]);
 
@@ -658,14 +761,31 @@ impl<'t> HashedReader<'t> {
                 // verify
                 let mut sha = sha2::Sha256::new();
                 if i + 1 < hash_cnt {
-                    sha.update(&b[buffered_end + i * 4096..buffered_end + (i + 1) * 4096]);
+                    let sl = &mut b[buffered_end + i * 4096..buffered_end + (i + 1) * 4096];
+                    sha.update(&sl);
+                    self.decryption.as_mut().map(|d| {
+                        let mut page = [0u8; 4096];
+                        page.copy_from_slice(&sl);
+                        d.decrypt(&mut page, c.unit);
+                        sl.copy_from_slice(&page);
+                    });
                 } else {
                     assert!(
                         ((max_len - (buffered_end + i * 4096) + self.buffered_len) == 4096),
                         "BUG! we need a 4096 block"
                     );
-                    sha.update(&b[buffered_end + i * 4096..max_len]);
-                    sha.update(&self.buffer[4096 - self.buffered_len..4096]);
+                    let l = &mut b[buffered_end + i * 4096..max_len];
+                    let r = &mut self.buffer[4096 - self.buffered_len..4096];
+                    sha.update(&l);
+                    sha.update(&r);
+                    self.decryption.as_mut().map(|d| {
+                        let mut page = [0u8; 4096];
+                        page[..l.len()].copy_from_slice(&l);
+                        page[l.len()..].copy_from_slice(&r);
+                        d.decrypt(&mut page, c.unit);
+                        l.copy_from_slice(&page[..l.len()]);
+                        r.copy_from_slice(&page[l.len()..]);
+                    });
                 }
                 if sha.finalize()[0..20] != c.block_hash {
                     panic!("SHA Mismatch!");

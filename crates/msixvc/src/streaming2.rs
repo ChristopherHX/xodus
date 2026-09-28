@@ -547,7 +547,7 @@ impl<'t> HashedReader<'t> {
         data_length: Option<Pages>,
     ) -> Self
     where
-        ReaderFactory: RangeReaderFactory + Send + 'static,
+        ReaderFactory: RangeReaderFactory,
     {
         let xvc_info_reader = {
             let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);

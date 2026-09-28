@@ -123,8 +123,8 @@ fn file_reader(path: String, out_io: Sender<Bytes>, start: usize, end: usize) ->
             let m: Bytes = buf.freeze();
             b.push_back(m.clone().split_to(r));
             pos += r;
-            if let Err(err) = out_io.blocking_send(m) {
-                println!("{err}");
+            if let Err(_) = out_io.blocking_send(m) {
+                // channel closed is the only error
                 break;
             }
         }
@@ -328,10 +328,10 @@ where
                         files.push((pfull_name, o, s));
                     }
                     for (file, o, s) in files {
-                        // TODO assert we are currently at position o
-                        let _ = o;
+                        let data_offset =
+                            layout.user_data.start.to_bytes().0 as usize + XvdUserDataHeader::SIZE;
+                        hr.assert_position(data_offset + o as usize);
                         if file.ends_with("SegmentMetadata.bin") {
-                            // TODO assert size o + s is the position
                             let segment_header = {
                                 let mut buf = XvdSegmentMetadataHeader::buffer();
                                 hr.read_full(&mut buf);
@@ -378,9 +378,10 @@ where
                         } else {
                             hr.read_full_discard(s as usize);
                         }
+                        hr.assert_position(data_offset + (o + s) as usize);
                     }
                     println!("done {}", sfiles.len());
-                    for (name, l, po, ps) in sfiles {
+                    for (name, l, po, ps) in &sfiles[..10] {
                         println!("{name} {l}, {po}, {ps}")
                     }
                 }
@@ -534,6 +535,7 @@ struct HashedReader<'t> {
     hash_offset: usize,
     l1_hashs: &'t [u8],
     l1_hash_offset: usize,
+    stream_pos: usize,
 }
 
 impl<'t> HashedReader<'t> {
@@ -602,6 +604,7 @@ impl<'t> HashedReader<'t> {
             hash_reader: hash_reader,
             l1_hashs: &l1_hashs[4096 * hash_pages_l1..],
             l1_hash_offset: hash_pages_l1_index,
+            stream_pos: data_start.to_bytes().0 as usize,
         };
         xvc_info_reader.fetch_next_l0_hash();
 
@@ -645,7 +648,10 @@ impl<'t> HashedReader<'t> {
                 if i + 1 < hash_cnt {
                     sha.update(&b[buffered_end + i * 4096..buffered_end + (i + 1) * 4096]);
                 } else {
-                    assert!(((max_len - (buffered_end + i * 4096) + self.buffered_len) == 4096), "BUG! we need a 4096 block");
+                    assert!(
+                        ((max_len - (buffered_end + i * 4096) + self.buffered_len) == 4096),
+                        "BUG! we need a 4096 block"
+                    );
                     sha.update(&b[buffered_end + i * 4096..max_len]);
                     sha.update(&self.buffer[4096 - self.buffered_len..4096]);
                 }
@@ -654,6 +660,7 @@ impl<'t> HashedReader<'t> {
                 }
             }
         }
+        self.stream_pos += b.len();
     }
     fn read_full_discard(&mut self, l: usize) {
         let mut discard_buf = [0u8; 4096 * 8];
@@ -682,5 +689,8 @@ impl<'t> HashedReader<'t> {
         if sha.finalize()[0..20] != c.block_hash {
             panic!("SHA Mismatch HT!");
         }
+    }
+    fn assert_position(&self, pos: usize) {
+        assert!(self.stream_pos == pos, "{} vs {}", self.stream_pos, pos);
     }
 }

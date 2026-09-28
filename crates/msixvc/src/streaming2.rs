@@ -159,8 +159,8 @@ impl RangeReaderFactory for HttpReaderFactory {
 fn fetch_and_verify_top_level<ReaderFactory>(
     reader: &ReaderFactory,
     layout: &XvdLayout,
-    t_hashs: &[u8; 32],
-    second_level: &HashTreeLevel,
+    top_level_hash: &[u8; 32],
+    top_level: &HashTreeLevel,
 ) -> Vec<u8>
 where
     ReaderFactory: RangeReaderFactory,
@@ -168,10 +168,10 @@ where
     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(
         out_io,
-        (layout.hash_tree.start + second_level.page_range.start)
+        (layout.hash_tree.start + top_level.page_range.start)
             .to_bytes()
             .0 as usize,
-        (layout.hash_tree.start + second_level.page_range.end)
+        (layout.hash_tree.start + top_level.page_range.end)
             .to_bytes()
             .0 as usize
             - 1,
@@ -180,7 +180,7 @@ where
     read_full(&mut in_prov_valid, &mut l3_hashs, None);
     let mut sha = sha2::Sha256::new();
     sha.update(&l3_hashs);
-    if sha.finalize()[0..32] != *t_hashs {
+    if sha.finalize()[0..32] != *top_level_hash {
         panic!("TODO");
     }
     l3_hashs
@@ -189,8 +189,8 @@ where
 fn fetch_and_verify_hash_level<ReaderFactory>(
     reader: &ReaderFactory,
     layout: &XvdLayout,
-    l3_hashs: &[u8],
-    second_level: &HashTreeLevel,
+    upper_hashs: &[u8],
+    lower_level: &HashTreeLevel,
 ) -> Vec<u8>
 where
     ReaderFactory: RangeReaderFactory,
@@ -198,22 +198,22 @@ where
     let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(
         out_io,
-        (layout.hash_tree.start + second_level.page_range.start)
+        (layout.hash_tree.start + lower_level.page_range.start)
             .to_bytes()
             .0 as usize,
-        (layout.hash_tree.start + second_level.page_range.end)
+        (layout.hash_tree.start + lower_level.page_range.end)
             .to_bytes()
             .0 as usize
             - 1,
     );
 
-    let mut l2_hashs = Vec::with_capacity(second_level.num_pages().to_bytes().0 as usize);
+    let mut l2_hashs = Vec::with_capacity(lower_level.num_pages().to_bytes().0 as usize);
     l2_hashs.resize(l2_hashs.capacity(), 0u8);
     read_full(&mut in_prov_valid, &mut l2_hashs, None);
-    for (i, c) in l3_hashs
+    for (i, c) in upper_hashs
         .chunks_exact(4096)
         .flat_map(|p| p.chunks_exact(HASH_ENTRY_LENGTH))
-        .take(second_level.num_pages().0 as usize)
+        .take(lower_level.num_pages().0 as usize)
         .map(XvdHashEntry::from_slice)
         .enumerate()
     {

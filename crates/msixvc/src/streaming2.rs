@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Div;
@@ -229,8 +229,42 @@ where
 
 pub struct Package {
     pub xvd_header: XvdHeader,
-    pub package_full_name: Option<String>,
-    pub xvc_info: Option<XvcInfo>,
+    pub package_full_name: String,
+    pub xvc_info: XvcInfo,
+    pub sfiles: Vec<(String, u64, u64, u64)>,
+    pub region_headers: Vec<XvcRegionHeader>,
+    pub region_specs: Vec<XvcRegionSpecifier>,
+    pub region_flags: Vec<u32>,
+    pub package_files: HashMap<String, String>,
+}
+
+impl Package {
+    pub fn dump(&self) {
+        println!("package_full_name: {}", self.package_full_name);
+        for (n, v) in &self.package_files {
+            println!("{}\n{}", n, v);
+        }
+        for (r, f) in self.region_headers.iter().zip(&self.region_flags) {
+            let c = r.description.iter().take_while(|c| **c != 0).count();
+            
+            println!(
+                "Region: {:x} {} {:?} {:x}",
+                u32::from_le_bytes(r.region_id.to_le_bytes()),
+                String::from_utf16(&r.description[0..c]).unwrap_or_else(|_| "<error>".to_owned()),
+                r.flags,
+                f
+            );
+            for s in self.region_specs.iter().filter(|s| r.region_id == s.region_id) {
+                let kl = s.key.iter().take_while(|c| **c != 0).count();
+                let vl = s.value.iter().take_while(|c| **c != 0).count();
+                println!(
+                    " {} {}",
+                    String::from_utf16(&s.key[..kl]).unwrap_or_else(|_| "<error>".to_owned()),
+                    String::from_utf16(&s.value[..vl]).unwrap_or_else(|_| "<error>".to_owned()),
+                );
+            }
+        }
+    }
 }
 
 pub async fn stream_fast<ReaderFactory>(
@@ -304,14 +338,18 @@ where
             let mut buf = XvdUserDataHeader::buffer();
             hr.read_full(&mut buf);
             let user_data_header = XvdUserDataHeader::from_array(&buf);
-            let mut package_full_name = None;
-            if user_data_header.t == 0 {
+            if user_data_header.t != 0 {
+                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "error")));
+            }
+            let mut sfiles = Vec::new();
+            let mut package_files = HashMap::<String, String>::new();
+            let package_full_name = {
                 hr.read_full_discard(user_data_header.length as usize - XvdUserDataHeader::SIZE);
                 let mut buf = XvdUserDataPackageFilesHeader::buffer();
                 hr.read_full(&mut buf);
                 let user_data_package_files_header =
                     XvdUserDataPackageFilesHeader::from_array(&buf);
-                package_full_name = Some(
+                let package_full_name = 
                     String::from_utf16(
                         &user_data_package_files_header.package_full_name[0
                             ..user_data_package_files_header
@@ -320,12 +358,9 @@ where
                                 .enumerate()
                                 .find_map(|(i, c)| if *c == 0 { Some(i) } else { None })
                                 .unwrap_or(0)],
-                    )
-                    .unwrap(),
-                );
+                    )?;
                 let mut buf = XvdUserDataPackageFileEntry::buffer();
                 let mut files = Vec::new();
-                let mut sfiles = Vec::new();
                 for _ in 0..user_data_package_files_header.file_count {
                     hr.read_full(&mut buf);
                     let user_data_package_file_entry =
@@ -337,8 +372,7 @@ where
                         .iter()
                         .position(|&c| c == 0)
                         .unwrap_or(fullname.len());
-                    let pfull_name: String = String::from_utf16(&fullname[..end]).unwrap();
-                    println!("{} | {} + {}", pfull_name, o, s);
+                    let pfull_name: String = String::from_utf16(&fullname[..end])?;
                     files.push((pfull_name, o, s));
                 }
                 for (file, o, s) in files {
@@ -370,7 +404,7 @@ where
                             hr.read_full(buf.as_mut_bytes());
                             // null u16, actually pretty useless waste of space
                             hr.read_full_discard(2);
-                            let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
+                            let file_name: String = String::from_utf16(buf.as_slice())?;
                             let page_length = if segment.filesize == 0 {
                                 1
                             } else {
@@ -383,26 +417,24 @@ where
                         let mut data = Vec::with_capacity(s as usize);
                         data.resize(data.capacity(), 0);
                         hr.read_full(&mut data);
-                        println!("{}\n{}", file, String::from_utf8_lossy(&data));
+                        package_files.insert(file, String::from_utf8(data)?);
                     } else {
                         hr.read_full_discard(s as usize);
                     }
                     hr.assert_position(data_offset + (o + s) as usize);
                 }
-                println!("done {}", sfiles.len());
-                for (name, l, po, ps) in &sfiles[..10] {
-                    println!("{name} {l}, {po}, {ps}")
-                }
-            }
+                package_full_name
+            };
 
-            let mut xvc_info = None;
-            {
-                xvc_info = {
+            if layout.xvc_info.len.0 == 0 {
+                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "error")));
+            }
+            let (xvc_info, region_headers, region_specs, region_flags) = {
+                let xvc_info = {
                     let mut buf = XvcInfo::buffer();
                     xvc_info_reader.read_full(&mut buf);
-                    Some(XvcInfo::from_array(&buf))
+                    XvcInfo::from_array(&buf)
                 };
-                let xvc_info = xvc_info.as_ref().unwrap();
                 let region_count = xvc_info.region_count;
                 let mut region_headers: Vec<XvcRegionHeader> =
                     Vec::with_capacity(region_count as usize);
@@ -432,31 +464,17 @@ where
                         }
                     }
                 }
-
-                for (r, f) in region_headers.iter().zip(region_flags) {
-                    let c = r.description.iter().take_while(|c| **c != 0).count();
-                    println!(
-                        "Region: {} {:?} {:x}",
-                        String::from_utf16(&r.description[0..c]).unwrap(),
-                        r.flags,
-                        f
-                    );
-                    for s in region_specs.iter().filter(|s| r.region_id == s.region_id) {
-                        let kl = s.key.iter().take_while(|c| **c != 0).count();
-                        let vl = s.value.iter().take_while(|c| **c != 0).count();
-                        println!(
-                            " {} {}",
-                            String::from_utf16(&s.key[..kl]).unwrap(),
-                            String::from_utf16(&s.value[..vl]).unwrap()
-                        );
-                    }
-                }
-                println!("done");
-            }
+                (xvc_info, region_headers, region_specs, region_flags)
+            };
             Ok(Package {
-                package_full_name: package_full_name,
-                xvd_header: xvd_header,
-                xvc_info: xvc_info,
+                xvd_header,
+                package_full_name,
+                sfiles,
+                xvc_info,
+                region_headers,
+                region_specs,
+                region_flags,
+                package_files,
             })
         })()
         .unwrap()
@@ -475,7 +493,7 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>> {
         client: c,
         urls: vec![url1.to_owned(), url2.to_owned()],
     })
-    .await?;
+    .await?.dump();
     Ok(())
 }
 
@@ -485,7 +503,7 @@ async fn test_read_fast3() -> Result<(), Box<dyn std::error::Error>> {
     stream_fast(FileReaderFactory {
         path: "StarTrucker.msixvc".to_owned(),
     })
-    .await?;
+    .await?.dump();
     Ok(())
 }
 
@@ -506,23 +524,6 @@ fn read_full(
     None
 }
 
-fn read_full_discard(
-    in_prov_valid: &mut Receiver<Bytes>,
-    l: usize,
-    mut remaining_b: Option<Bytes>,
-) -> Option<Bytes> {
-    let mut offset = 0;
-    while let Some(mut b) = remaining_b.take().or_else(|| in_prov_valid.blocking_recv()) {
-        let m = min(offset + b.len(), l);
-        let _ = b.split_to(m - offset);
-        offset = m;
-        if m == l {
-            return Some(b);
-        }
-    }
-    None
-}
-
 struct ChannelReader {
     in_prov_valid: Receiver<Bytes>,
     remaining_b: Option<Bytes>,
@@ -534,9 +535,6 @@ impl ChannelReader {
         let Some(_) = &self.remaining_b else {
             panic!("No data!");
         };
-    }
-    fn read_full_discard(&mut self, l: usize) {
-        self.remaining_b = read_full_discard(&mut self.in_prov_valid, l, self.remaining_b.take());
     }
 }
 

@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Div;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -226,79 +227,92 @@ where
     l2_hashs
 }
 
+pub struct Package {
+    pub xvd_header: XvdHeader,
+    pub package_full_name: Option<String>,
+    pub xvc_info: Option<XvcInfo>,
+}
+
 pub async fn stream_fast<ReaderFactory>(
     reader: ReaderFactory,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<Package, Box<dyn std::error::Error>>
 where
     ReaderFactory: RangeReaderFactory + Send + 'static,
 {
-    {
-        let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
-        reader.new(out_io, 0, 4096);
-        tokio::task::spawn_blocking(move || {
-            (|| -> Result<(), Box<dyn std::error::Error>> {
-                let mut xvd_header_buf = XvdHeader::buffer();
-                let _ = read_full(&mut in_prov_valid, &mut xvd_header_buf, None);
-                let xvd_header = XvdHeader::try_from_array(&xvd_header_buf)?;
-                let layout = xvd_header.layout();
-                let target_offset = layout.user_data.start.to_bytes().0 as usize;
-                let target_end = target_offset + layout.user_data.len.0 as usize;
+    let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
+    reader.new(out_io, 0, 4096);
+    let r = tokio::task::spawn_blocking(move || {
+        (|| -> Result<Package, Box<dyn std::error::Error>> {
+            let mut xvd_header_buf = XvdHeader::buffer();
+            let _ = read_full(&mut in_prov_valid, &mut xvd_header_buf, None);
+            let xvd_header = XvdHeader::try_from_array(&xvd_header_buf)?;
+            let layout = xvd_header.layout();
+            let target_offset = layout.user_data.start.to_bytes().0 as usize;
+            let target_end = target_offset + layout.user_data.len.0 as usize;
 
-                let top_level = layout.hash_tree_layout.level3;
-                let second_level = layout.hash_tree_layout.level2;
-                let third_level = layout.hash_tree_layout.level1;
+            let top_level = layout.hash_tree_layout.level3;
+            let second_level = layout.hash_tree_layout.level2;
+            let third_level = layout.hash_tree_layout.level1;
 
-                let l1_hashs = {
-                    if top_level.is_top() {
-                        let l3_hashs = fetch_and_verify_top_level(
-                            &reader,
-                            &layout,
-                            &xvd_header.top_hash_block_hash,
-                            &top_level,
-                        );
-                        let l2_hashs =
-                            fetch_and_verify_hash_level(&reader, &layout, &l3_hashs, &second_level);
-                        fetch_and_verify_hash_level(&reader, &layout, &l2_hashs, &third_level)
-                    } else if second_level.is_top() {
-                        let l2_hashs = fetch_and_verify_top_level(
-                            &reader,
-                            &layout,
-                            &xvd_header.top_hash_block_hash,
-                            &second_level,
-                        );
-                        fetch_and_verify_hash_level(&reader, &layout, &l2_hashs, &third_level)
-                    } else if third_level.is_top() {
-                        fetch_and_verify_top_level(
-                            &reader,
-                            &layout,
-                            &xvd_header.top_hash_block_hash,
-                            &third_level,
-                        )
-                    } else {
-                        panic!("No way unsupported");
-                    }
-                };
-
-                let mut hr = HashedReader::new(
-                    &reader,
-                    &l1_hashs,
-                    &layout,
-                    Pages(target_offset.div(4096) as u32),
-                    Some(Pages(target_end.div_ceil(4096) as u32)),
-                );
-
-                let mut buf = XvdUserDataHeader::buffer();
-                hr.read_full(&mut buf);
-                let user_data_header = XvdUserDataHeader::from_array(&buf);
-                if user_data_header.t == 0 {
-                    hr.read_full_discard(
-                        user_data_header.length as usize - XvdUserDataHeader::SIZE,
+            let l1_hashs = Arc::new({
+                if top_level.is_top() {
+                    let l3_hashs = fetch_and_verify_top_level(
+                        &reader,
+                        &layout,
+                        &xvd_header.top_hash_block_hash,
+                        &top_level,
                     );
-                    let mut buf = XvdUserDataPackageFilesHeader::buffer();
-                    hr.read_full(&mut buf);
-                    let user_data_package_files_header =
-                        XvdUserDataPackageFilesHeader::from_array(&buf);
-                    let full_package_name = String::from_utf16(
+                    let l2_hashs =
+                        fetch_and_verify_hash_level(&reader, &layout, &l3_hashs, &second_level);
+                    fetch_and_verify_hash_level(&reader, &layout, &l2_hashs, &third_level)
+                } else if second_level.is_top() {
+                    let l2_hashs = fetch_and_verify_top_level(
+                        &reader,
+                        &layout,
+                        &xvd_header.top_hash_block_hash,
+                        &second_level,
+                    );
+                    fetch_and_verify_hash_level(&reader, &layout, &l2_hashs, &third_level)
+                } else if third_level.is_top() {
+                    fetch_and_verify_top_level(
+                        &reader,
+                        &layout,
+                        &xvd_header.top_hash_block_hash,
+                        &third_level,
+                    )
+                } else {
+                    panic!("No way unsupported");
+                }
+            });
+
+            let mut hr = HashedReader::new(
+                &reader,
+                &l1_hashs,
+                &layout,
+                Pages(target_offset.div(4096) as u32),
+                Some(Pages(target_end.div_ceil(4096) as u32)),
+            );
+
+            let mut xvc_info_reader = HashedReader::new(
+                &reader,
+                &l1_hashs,
+                &layout,
+                layout.xvc_info.start,
+                Some(layout.xvc_info.len.to_page_count()),
+            );
+
+            let mut buf = XvdUserDataHeader::buffer();
+            hr.read_full(&mut buf);
+            let user_data_header = XvdUserDataHeader::from_array(&buf);
+            let mut package_full_name = None;
+            if user_data_header.t == 0 {
+                hr.read_full_discard(user_data_header.length as usize - XvdUserDataHeader::SIZE);
+                let mut buf = XvdUserDataPackageFilesHeader::buffer();
+                hr.read_full(&mut buf);
+                let user_data_package_files_header =
+                    XvdUserDataPackageFilesHeader::from_array(&buf);
+                package_full_name = Some(
+                    String::from_utf16(
                         &user_data_package_files_header.package_full_name[0
                             ..user_data_package_files_header
                                 .package_full_name
@@ -307,150 +321,148 @@ where
                                 .find_map(|(i, c)| if *c == 0 { Some(i) } else { None })
                                 .unwrap_or(0)],
                     )
-                    .unwrap();
-                    println!("full_package_name={full_package_name}");
-                    let mut buf = XvdUserDataPackageFileEntry::buffer();
-                    let mut files = Vec::new();
-                    let mut sfiles = Vec::new();
-                    for _ in 0..user_data_package_files_header.file_count {
-                        hr.read_full(&mut buf);
-                        let user_data_package_file_entry =
-                            XvdUserDataPackageFileEntry::from_array(&buf);
-                        let o = user_data_package_file_entry.offset;
-                        let s: u32 = user_data_package_file_entry.size;
-                        let fullname = user_data_package_file_entry.file_path;
-                        let end = fullname
-                            .iter()
-                            .position(|&c| c == 0)
-                            .unwrap_or(fullname.len());
-                        let pfull_name: String = String::from_utf16(&fullname[..end]).unwrap();
-                        println!("{} | {} + {}", pfull_name, o, s);
-                        files.push((pfull_name, o, s));
-                    }
-                    for (file, o, s) in files {
-                        let data_offset =
-                            layout.user_data.start.to_bytes().0 as usize + XvdUserDataHeader::SIZE;
-                        hr.assert_position(data_offset + o as usize);
-                        if file.ends_with("SegmentMetadata.bin") {
-                            let segment_header = {
-                                let mut buf = XvdSegmentMetadataHeader::buffer();
-                                hr.read_full(&mut buf);
-                                XvdSegmentMetadataHeader::try_from_array(&buf)?
-                            };
-
-                            let mut segments =
-                                Vec::with_capacity(segment_header.segment_count as usize);
-                            let mut buf = XvdSegmentMetadataSegment::buffer();
-                            for _ in 0..segment_header.segment_count {
-                                hr.read_full(&mut buf);
-                                let segment = XvdSegmentMetadataSegment::from_array(&buf);
-                                segments.push(segment);
-                            }
-
-                            let mut page_offset = 0;
-
-                            for segment in segments {
-                                let s = segment.path_length;
-                                let mut buf = vec![0u16, 0];
-                                buf.resize(s as usize, 0);
-                                hr.read_full(buf.as_mut_bytes());
-                                // null u16, actually pretty useless waste of space
-                                hr.read_full_discard(2);
-                                let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
-                                let page_length = if segment.filesize == 0 {
-                                    1
-                                } else {
-                                    segment.filesize.div_ceil(PAGE_SIZE as u64)
-                                };
-                                sfiles.push((
-                                    file_name,
-                                    segment.filesize,
-                                    page_offset,
-                                    page_length,
-                                ));
-                                page_offset += page_length;
-                            }
-                        } else if file.ends_with(".config") || file.ends_with(".json") {
-                            let mut data = Vec::with_capacity(s as usize);
-                            data.resize(data.capacity(), 0);
-                            hr.read_full(&mut data);
-                            println!("{}\n{}", file, String::from_utf8_lossy(&data));
-                        } else {
-                            hr.read_full_discard(s as usize);
-                        }
-                        hr.assert_position(data_offset + (o + s) as usize);
-                    }
-                    println!("done {}", sfiles.len());
-                    for (name, l, po, ps) in &sfiles[..10] {
-                        println!("{name} {l}, {po}, {ps}")
-                    }
+                    .unwrap(),
+                );
+                let mut buf = XvdUserDataPackageFileEntry::buffer();
+                let mut files = Vec::new();
+                let mut sfiles = Vec::new();
+                for _ in 0..user_data_package_files_header.file_count {
+                    hr.read_full(&mut buf);
+                    let user_data_package_file_entry =
+                        XvdUserDataPackageFileEntry::from_array(&buf);
+                    let o = user_data_package_file_entry.offset;
+                    let s: u32 = user_data_package_file_entry.size;
+                    let fullname = user_data_package_file_entry.file_path;
+                    let end = fullname
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(fullname.len());
+                    let pfull_name: String = String::from_utf16(&fullname[..end]).unwrap();
+                    println!("{} | {} + {}", pfull_name, o, s);
+                    files.push((pfull_name, o, s));
                 }
+                for (file, o, s) in files {
+                    let data_offset =
+                        layout.user_data.start.to_bytes().0 as usize + XvdUserDataHeader::SIZE;
+                    hr.assert_position(data_offset + o as usize);
+                    if file.ends_with("SegmentMetadata.bin") {
+                        let segment_header = {
+                            let mut buf = XvdSegmentMetadataHeader::buffer();
+                            hr.read_full(&mut buf);
+                            XvdSegmentMetadataHeader::try_from_array(&buf)?
+                        };
 
-                {
-                    let mut xvc_info_reader =
-                        HashedReader::new(&reader, &l1_hashs, &layout, layout.xvc_info.start, None);
-                    let xvc_info = {
-                        let mut buf = XvcInfo::buffer();
+                        let mut segments =
+                            Vec::with_capacity(segment_header.segment_count as usize);
+                        let mut buf = XvdSegmentMetadataSegment::buffer();
+                        for _ in 0..segment_header.segment_count {
+                            hr.read_full(&mut buf);
+                            let segment = XvdSegmentMetadataSegment::from_array(&buf);
+                            segments.push(segment);
+                        }
+
+                        let mut page_offset = 0;
+
+                        for segment in segments {
+                            let s = segment.path_length;
+                            let mut buf = vec![0u16, 0];
+                            buf.resize(s as usize, 0);
+                            hr.read_full(buf.as_mut_bytes());
+                            // null u16, actually pretty useless waste of space
+                            hr.read_full_discard(2);
+                            let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
+                            let page_length = if segment.filesize == 0 {
+                                1
+                            } else {
+                                segment.filesize.div_ceil(PAGE_SIZE as u64)
+                            };
+                            sfiles.push((file_name, segment.filesize, page_offset, page_length));
+                            page_offset += page_length;
+                        }
+                    } else if file.ends_with(".config") || file.ends_with(".json") {
+                        let mut data = Vec::with_capacity(s as usize);
+                        data.resize(data.capacity(), 0);
+                        hr.read_full(&mut data);
+                        println!("{}\n{}", file, String::from_utf8_lossy(&data));
+                    } else {
+                        hr.read_full_discard(s as usize);
+                    }
+                    hr.assert_position(data_offset + (o + s) as usize);
+                }
+                println!("done {}", sfiles.len());
+                for (name, l, po, ps) in &sfiles[..10] {
+                    println!("{name} {l}, {po}, {ps}")
+                }
+            }
+
+            let mut xvc_info = None;
+            {
+                xvc_info = {
+                    let mut buf = XvcInfo::buffer();
+                    xvc_info_reader.read_full(&mut buf);
+                    Some(XvcInfo::from_array(&buf))
+                };
+                let xvc_info = xvc_info.as_ref().unwrap();
+                let region_count = xvc_info.region_count;
+                let mut region_headers: Vec<XvcRegionHeader> =
+                    Vec::with_capacity(region_count as usize);
+                let mut region_specs: Vec<XvcRegionSpecifier> =
+                    Vec::with_capacity(xvc_info.region_specifier_count as usize);
+                let mut region_flags: Vec<u32> = Vec::with_capacity(region_count as usize);
+                if xvc_info.version >= 1 {
+                    let mut buf = XvcRegionHeader::buffer();
+                    for _ in 0..region_count {
                         xvc_info_reader.read_full(&mut buf);
-                        XvcInfo::from_array(&buf)
-                    };
-                    let region_count = xvc_info.region_count;
-                    let mut region_headers: Vec<XvcRegionHeader> =
-                        Vec::with_capacity(region_count as usize);
-                    let mut region_specs: Vec<XvcRegionSpecifier> =
-                        Vec::with_capacity(xvc_info.region_specifier_count as usize);
-                    let mut region_flags: Vec<u32> = Vec::with_capacity(region_count as usize);
-                    if xvc_info.version >= 1 {
-                        let mut buf = XvcRegionHeader::buffer();
+                        let region_header = XvcRegionHeader::try_from_array(&buf)?;
+                        region_headers.push(region_header);
+                    }
+                    xvc_info_reader
+                        .read_full_discard((xvc_info.update_segment_count * 12) as usize);
+                    let mut buf = XvcRegionSpecifier::buffer();
+                    for _ in 0..xvc_info.region_specifier_count {
+                        xvc_info_reader.read_full(&mut buf);
+                        let region_spec = XvcRegionSpecifier::from_array(&buf);
+                        region_specs.push(region_spec);
+                    }
+                    if layout.mutable_data.len.0 > 0 {
+                        let mut buf = [0u8; 1];
                         for _ in 0..region_count {
                             xvc_info_reader.read_full(&mut buf);
-                            let region_header = XvcRegionHeader::try_from_array(&buf)?;
-                            region_headers.push(region_header);
-                        }
-                        xvc_info_reader
-                            .read_full_discard((xvc_info.update_segment_count * 12) as usize);
-                        let mut buf = XvcRegionSpecifier::buffer();
-                        for _ in 0..xvc_info.region_specifier_count {
-                            xvc_info_reader.read_full(&mut buf);
-                            let region_spec = XvcRegionSpecifier::from_array(&buf);
-                            region_specs.push(region_spec);
-                        }
-                        if layout.mutable_data.len.0 > 0 {
-                            let mut buf = [0u8; 1];
-                            for _ in 0..region_count {
-                                xvc_info_reader.read_full(&mut buf);
-                                region_flags.push(buf[0] as u32);
-                            }
+                            region_flags.push(buf[0] as u32);
                         }
                     }
-
-                    for (r, f) in region_headers.iter().zip(region_flags) {
-                        let c = r.description.iter().take_while(|c| **c != 0).count();
-                        println!(
-                            "Region: {} {:?} {:x}",
-                            String::from_utf16(&r.description[0..c]).unwrap(),
-                            r.flags,
-                            f
-                        );
-                        for s in region_specs.iter().filter(|s| r.region_id == s.region_id) {
-                            let kl = s.key.iter().take_while(|c| **c != 0).count();
-                            let vl = s.value.iter().take_while(|c| **c != 0).count();
-                            println!(
-                                " {} {}",
-                                String::from_utf16(&s.key[..kl]).unwrap(),
-                                String::from_utf16(&s.value[..vl]).unwrap()
-                            );
-                        }
-                    }
-                    println!("done");
                 }
-                Ok(())
-            })()
-            .unwrap();
-        })
-        .await?;
-    };
-    Ok(())
+
+                for (r, f) in region_headers.iter().zip(region_flags) {
+                    let c = r.description.iter().take_while(|c| **c != 0).count();
+                    println!(
+                        "Region: {} {:?} {:x}",
+                        String::from_utf16(&r.description[0..c]).unwrap(),
+                        r.flags,
+                        f
+                    );
+                    for s in region_specs.iter().filter(|s| r.region_id == s.region_id) {
+                        let kl = s.key.iter().take_while(|c| **c != 0).count();
+                        let vl = s.value.iter().take_while(|c| **c != 0).count();
+                        println!(
+                            " {} {}",
+                            String::from_utf16(&s.key[..kl]).unwrap(),
+                            String::from_utf16(&s.value[..vl]).unwrap()
+                        );
+                    }
+                }
+                println!("done");
+            }
+            Ok(Package {
+                package_full_name: package_full_name,
+                xvd_header: xvd_header,
+                xvc_info: xvc_info,
+            })
+        })()
+        .unwrap()
+    })
+    .await?;
+    Ok(r)
 }
 
 #[tokio::test]
@@ -463,7 +475,8 @@ async fn test_read_fast2() -> Result<(), Box<dyn std::error::Error>> {
         client: c,
         urls: vec![url1.to_owned(), url2.to_owned()],
     })
-    .await
+    .await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -472,7 +485,8 @@ async fn test_read_fast3() -> Result<(), Box<dyn std::error::Error>> {
     stream_fast(FileReaderFactory {
         path: "StarTrucker.msixvc".to_owned(),
     })
-    .await
+    .await?;
+    Ok(())
 }
 
 fn read_full(

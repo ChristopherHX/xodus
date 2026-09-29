@@ -285,27 +285,21 @@ impl Package {
         let hashes = self.hashes.clone();
         let layout = self.xvd_header.layout();
         let header = self.xvd_header.clone();
-        for (i, (entry, bs, o, ps)) in (&self.sfiles).iter().enumerate() {
+        let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
+        let mut region_offset = 0;
+        for (i, (entry, bs, _, ps)) in (&self.sfiles).iter().enumerate() {
+            while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
+                region_headers = &region_headers[1..];
+                region_offset = 0;
+            }
             if *entry != file_name {
+                region_offset += *ps;
                 continue;
             }
-            let o = *o;
+            let o = region_offset as u64;
             let ps = *ps;
             let bs = *bs;
-            // let region = self
-            //     .region_headers
-            //     .iter()
-            //     .find(|h| {
-            //         h.offset.to_bytes().0 >= o && (h.offset + h.length).to_bytes().0 <= o + ps
-            //     })
-            //     .cloned();
-            let region = self
-                .region_headers
-                .iter()
-                .filter(|h| (h.first_segment_index as usize) < i)
-                .last()
-                .cloned()
-                .unwrap();
+            let region = region_headers[0].clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let mut fout = File::create(&file_name).unwrap();
                 let mut hr = HashedReader::new(
@@ -315,8 +309,10 @@ impl Package {
                     region.offset + Pages(o as u32),
                     Some(Pages(ps as u32)),
                 );
-                hr.decryption =
-                    full_key.map(|full_key| DecryptionsRuntime::new(&header, &region, full_key));
+                if region.key_id.is_encrypted() {
+                    hr.decryption =
+                        full_key.map(|full_key| DecryptionsRuntime::new(&header, &region, full_key));
+                }
                 let mut buf = [0u8; 4096];
                 let mut written = 0;
                 while written < ps {

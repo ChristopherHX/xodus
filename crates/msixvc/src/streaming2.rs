@@ -310,8 +310,8 @@ impl Package {
                     Some(Pages(ps as u32)),
                 );
                 if region.key_id.is_encrypted() {
-                    hr.decryption =
-                        full_key.map(|full_key| DecryptionsRuntime::new(&header, &region, full_key));
+                    hr.decryption = full_key
+                        .map(|full_key| DecryptionsRuntime::new(&header, &region, full_key));
                 }
                 let mut buf = [0u8; 4096];
                 let mut written = 0;
@@ -320,9 +320,9 @@ impl Package {
                     fout.write_all(&buf).unwrap();
                     written += 1;
                 }
-                // if full_key.is_some() {
-                fout.set_len(bs).unwrap();
-                // }
+                if !region.key_id.is_encrypted() || full_key.is_some() {
+                    fout.set_len(bs).unwrap();
+                }
                 fout.sync_all().unwrap();
             })
             .await;

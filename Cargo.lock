@@ -3352,6 +3352,7 @@ dependencies = [
  "bitflags 2.13.1",
  "bytes",
  "chrono",
+ "futures-core",
  "futures-util",
  "gpt",
  "msixvc-common",

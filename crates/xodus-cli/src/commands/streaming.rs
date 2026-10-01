@@ -7,7 +7,7 @@ use fs2::available_space;
 use futures_util::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use msixvc::streaming;
-use msixvc::streaming2::{HttpReaderFactory, stream_fast};
+use msixvc::streaming2::{FileReaderFactory, HttpReaderFactory, stream_fast};
 // use msixvc::streaming2::{HttpReaderFactory, Package, stream_fast};
 use msixvc::xvd::{SegmentFile, XvdFile};
 use tokio::fs::{File, OpenOptions};
@@ -32,6 +32,11 @@ enum ProgressEvent {
     UpdateStatus { name: String },
 }
 
+enum MyReaderFactory {
+    Http(HttpReaderFactory),
+    File(FileReaderFactory),
+}
+
 pub async fn run(
     client: &reqwest::Client,
     tokens: &TokenManager,
@@ -41,24 +46,18 @@ pub async fn run(
     parallel: Option<usize>,
     market: Option<String>,
 ) -> ExitCode {
-    let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(256);
-    if source.starts_with("file://") {
+    let (pkg, factory) = if source.starts_with("file://") {
         let fsrc = source.strip_prefix("file://").unwrap_or_default();
-        let f = match File::open(fsrc).await {
-            Ok(f) => f,
-            Err(err) => {
-                eprintln!("could not open {fsrc}: {err}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let l = match f.metadata().await {
-            Ok(metadata) => metadata.len(),
-            Err(err) => {
-                eprintln!("could not read metadata for {fsrc}: {err}");
-                return ExitCode::FAILURE;
-            }
-        };
-        panic!();
+        (
+            stream_fast(FileReaderFactory {
+                path: fsrc.to_string(),
+            })
+            .await
+            .unwrap(),
+            MyReaderFactory::File(FileReaderFactory {
+                path: fsrc.to_string(),
+            }),
+        )
     } else {
         let vurl = if source.starts_with("http://") || source.starts_with("https://") {
             source
@@ -102,49 +101,55 @@ pub async fn run(
         };
         let url = &vurl;
 
-        let pkg = stream_fast(HttpReaderFactory {
-            client: client.clone(),
-            urls: vec![url.to_owned()],
-        })
-        .await
-        .unwrap();
-
-        let license = get_license(
-            client,
-            tokens,
-            pkg.xvd_header.vduid.to_string(),
-            market.unwrap_or("neutral".to_string()),
-        )
-        .await;
-        if let Err(err) = license {
-            eprintln!("{}", err);
-            return ExitCode::FAILURE;
-        }
-        let (key, game_splicense) = license.unwrap();
-        if game_splicense.content_keys.len() != 1 {
-            eprintln!(
-                "unexpected number of content keys {}",
-                game_splicense.content_keys.len()
-            );
-            return ExitCode::FAILURE;
-        }
-        let Some((_, content_key)) = game_splicense.content_keys.into_iter().next() else {
-            return ExitCode::FAILURE;
-        };
-
-        let full_key = content_key.unpack(&key).expect("failed to unpack");
-
-        pkg.dump();
-        // Some(*full_key)
-        pkg.download(
-            HttpReaderFactory {
+        (
+            stream_fast(HttpReaderFactory {
                 client: client.clone(),
                 urls: vec![url.to_owned()],
-            },
-            "Microsoft.UI.Xaml.Controls.dll".to_owned(),
-            Some(*full_key),
+            })
+            .await
+            .unwrap(),
+            MyReaderFactory::Http(HttpReaderFactory {
+                client: client.clone(),
+                urls: vec![url.to_owned()],
+            }),
         )
-        .await;
+    };
+
+    let license = get_license(
+        client,
+        tokens,
+        pkg.xvd_header.vduid.to_string(),
+        market.unwrap_or("neutral".to_string()),
+    )
+    .await;
+    if let Err(err) = license {
+        eprintln!("{}", err);
+        return ExitCode::FAILURE;
+    }
+    let (key, game_splicense) = license.unwrap();
+    if game_splicense.content_keys.len() != 1 {
+        eprintln!(
+            "unexpected number of content keys {}",
+            game_splicense.content_keys.len()
+        );
+        return ExitCode::FAILURE;
+    }
+    let Some((_, content_key)) = game_splicense.content_keys.into_iter().next() else {
+        return ExitCode::FAILURE;
+    };
+
+    let full_key = content_key.unpack(&key).expect("failed to unpack");
+
+    pkg.dump();
+    match factory {
+        MyReaderFactory::Http(http_reader_factory) => {
+            pkg.download_all(http_reader_factory, destination, Some(*full_key))
+                .await
+        }
+        MyReaderFactory::File(file_reader_factory) => {
+            pkg.download_all(file_reader_factory, destination, Some(*full_key))
+                .await
+        }
     }
 
     ExitCode::SUCCESS

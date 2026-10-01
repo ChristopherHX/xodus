@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Div;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -104,11 +105,12 @@ fn file_reader(path: String, out_io: Sender<Bytes>, start: usize, end: usize) ->
         f.seek(SeekFrom::Start(start as u64)).unwrap();
         let mut pos = start;
         assert!(start <= end || end == 0, "{start} {end}");
-        let mut buf = bytes::BytesMut::with_capacity(64 * 4096 * 8);
+        let byte_len = 16 * 4096 * 4096;
+        let mut buf = bytes::BytesMut::with_capacity(32 * byte_len);
         buf.resize(buf.capacity(), 0u8);
-        let mut b = VecDeque::with_capacity(64);
-        for _ in 0..64 {
-            b.push_back(buf.split_to(4096 * 8).freeze());
+        let mut b = VecDeque::with_capacity(32);
+        for _ in 0..32 {
+            b.push_back(buf.split_to(byte_len).freeze());
         }
 
         loop {
@@ -123,10 +125,10 @@ fn file_reader(path: String, out_io: Sender<Bytes>, start: usize, end: usize) ->
                 // End of Substream
                 break;
             }
-            let r = f.read(&mut buf[..max_read]).unwrap();
+            f.read_exact(&mut buf[..max_read]).unwrap();
             let m: Bytes = buf.freeze();
-            b.push_back(m.clone().split_to(r));
-            pos += r;
+            b.push_back(m.clone());
+            pos += max_read;
             if let Err(_) = out_io.blocking_send(m) {
                 // channel closed is the only error
                 break;
@@ -328,6 +330,67 @@ impl Package {
             .await;
             return;
         }
+    }
+
+    pub async fn download_all<ReaderFactory>(
+        &self,
+        reader: ReaderFactory,
+        destination: String,
+        full_key: Option<[u8; 32]>,
+    ) where
+        ReaderFactory: RangeReaderFactory + Send + 'static,
+    {
+        let hashes = self.hashes.clone();
+        let layout = self.xvd_header.layout();
+        let header = self.xvd_header.clone();
+        let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
+        let mut region_offset = region_headers[0].offset;
+        let mut file_map = Vec::new();
+        for (i, (entry, bs, _, ps)) in (&self.sfiles).iter().enumerate() {
+            while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
+                region_headers = &region_headers[1..];
+                region_offset = region_headers[0].offset;
+            }
+            let o = region_offset;
+            let ps = *ps;
+            let bs = *bs;
+            let region = region_headers[0].clone();
+            file_map.push((region, entry.to_string(), o, ps, bs));
+            region_offset += Pages(ps as u32);
+        }
+        let offset = Pages(file_map.first().unwrap().0.offset.0 as u32);
+        let length =
+            Pages((file_map.last().unwrap().2.0 as u64 + file_map.last().unwrap().3) as u32) - offset;
+
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length));
+            let byte_len = 256 * 4096 * 4096;
+            let mut buf = bytes::BytesMut::with_capacity(byte_len);
+            buf.resize(byte_len, 0);
+            for (region, entry, o, ps, bs) in file_map {
+                hr.read_full_discard(o.to_bytes().0 as usize - hr.stream_pos);
+                hr.assert_position(o.to_bytes().0 as usize);
+                let file_name = PathBuf::from(&destination).join(entry.replace("\\", "/"));
+                std::fs::create_dir_all(file_name.parent().unwrap()).unwrap();
+                let mut fout = File::create(file_name).unwrap();
+                if region.key_id.is_encrypted() && hr.decryption.is_none() {
+                    hr.decryption = full_key
+                        .map(|full_key| DecryptionsRuntime::new(&header, &region, full_key));
+                }
+                let mut written = 0;
+                while written < ps {
+                    let bytes_to_copy = min(buf.len(), ((ps - written) * 4096) as usize);
+                    hr.read_full(&mut buf[..bytes_to_copy]);
+                    fout.write_all(&buf[..bytes_to_copy]).unwrap();
+                    written += (bytes_to_copy / 4096) as u64;
+                }
+                if !region.key_id.is_encrypted() || full_key.is_some() {
+                    fout.set_len(bs).unwrap();
+                }
+                fout.sync_all().unwrap();
+            }
+        })
+        .await;
     }
 }
 
@@ -660,7 +723,7 @@ impl<'t> HashedReader<'t> {
         ReaderFactory: RangeReaderFactory,
     {
         let xvc_info_reader = {
-            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
+            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(10);
             reader.new(
                 out_io,
                 data_start.to_bytes().0 as usize,
@@ -691,7 +754,7 @@ impl<'t> HashedReader<'t> {
         .to_bytes()
         .0 as usize;
         let hash_reader = {
-            let (hash_io, in_hash) = mpsc::channel::<Bytes>(100);
+            let (hash_io, in_hash) = mpsc::channel::<Bytes>(10);
             reader.new(
                 hash_io,
                 hash_bytes_start,

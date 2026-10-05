@@ -114,7 +114,7 @@ pub async fn run(
             }),
         )
     };
-
+    pkg.dump();
     let license = get_license(
         client,
         tokens,
@@ -140,15 +140,24 @@ pub async fn run(
 
     let full_key = content_key.unpack(&key).expect("failed to unpack");
 
-    pkg.dump();
     match factory {
         MyReaderFactory::Http(http_reader_factory) => {
-            pkg.download_all(http_reader_factory, destination, Some(*full_key))
-                .await
+            if try_skip_ntfs {
+                pkg.check_all(http_reader_factory).await.unwrap()
+            } else {
+                pkg.download_all(http_reader_factory, destination, Some(*full_key))
+                    .await
+                    .unwrap()
+            }
         }
         MyReaderFactory::File(file_reader_factory) => {
-            pkg.download_all(file_reader_factory, destination, Some(*full_key))
-                .await
+            if try_skip_ntfs {
+                pkg.check_all(file_reader_factory).await.unwrap()
+            } else {
+                pkg.download_all(file_reader_factory, destination, Some(*full_key))
+                    .await
+                    .unwrap()
+            }
         }
     }
 

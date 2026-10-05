@@ -10,7 +10,7 @@ use std::time::Duration;
 use aes::cipher::KeyInit;
 use aes::{Aes128Dec, Aes128Enc};
 use bytes::{Bytes, BytesMut};
-use futures_util::{StreamExt};
+use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
 use reqwest::Client;
 use reqwest::header::RANGE;
@@ -24,7 +24,9 @@ use crate::crypt::{TweakGenerator, decrypt_page_xts};
 use crate::layout::{PAGE_SIZE, Pages};
 use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, XvdLayout};
 use crate::models::xvd::{
-    HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionSpecifier, XvdHashEntry, XvdHeader, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionSpecifier, XvdHashEntry, XvdHeader,
+    XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader,
+    XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -97,7 +99,12 @@ fn http_reader(
     })
 }
 
-fn file_reader(path: String, out_io: Sender<Bytes>, start: usize, end: usize) -> JoinHandle<Result<()>> {
+fn file_reader(
+    path: String,
+    out_io: Sender<Bytes>,
+    start: usize,
+    end: usize,
+) -> JoinHandle<Result<()>> {
     tokio::task::spawn_blocking(move || -> Result<()> {
         let mut f = File::open(path)?;
         f.seek(SeekFrom::Start(start as u64))?;
@@ -136,7 +143,12 @@ fn file_reader(path: String, out_io: Sender<Bytes>, start: usize, end: usize) ->
     })
 }
 
-fn file_reader_stub(path: String, out_io: Sender<Bytes>, start: usize, end: usize) -> JoinHandle<Result<()>> {
+fn file_reader_stub(
+    path: String,
+    out_io: Sender<Bytes>,
+    start: usize,
+    end: usize,
+) -> JoinHandle<Result<()>> {
     tokio::task::spawn_blocking(move || -> Result<()> {
         let mut f = File::open(path)?;
         f.seek(SeekFrom::Start(start as u64))?;
@@ -287,7 +299,7 @@ trait ToResult<T> {
 
 impl<T> ToResult<T> for Option<T> {
     fn to_result(self, data: &str) -> Result<T> {
-        let v = self.map_or_else(||Err(std::io::Error::other(data)), |v|Ok(v))?;
+        let v = self.map_or_else(|| Err(std::io::Error::other(data)), |v| Ok(v))?;
         Ok(v)
     }
 }
@@ -416,7 +428,8 @@ impl Package {
         }
         let offset = Pages(file_map.first().unwrap().0.offset.0 as u32);
         let length =
-            Pages((file_map.last().unwrap().2.0 as u64 + file_map.last().unwrap().3) as u32) - offset;
+            Pages((file_map.last().unwrap().2.0 as u64 + file_map.last().unwrap().3) as u32)
+                - offset;
 
         let _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length))?;
@@ -450,10 +463,7 @@ impl Package {
         Ok(())
     }
 
-    pub async fn check_all<ReaderFactory>(
-        &self,
-        reader: ReaderFactory
-    ) -> Result<()>
+    pub async fn check_all<ReaderFactory>(&self, reader: ReaderFactory) -> Result<()>
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
@@ -480,9 +490,10 @@ impl Package {
         }
         let offset = Pages(file_map.first().unwrap().0.offset.0 as u32);
         let length =
-            Pages((file_map.last().unwrap().2.0 as u64 + file_map.last().unwrap().3) as u32) - offset;
+            Pages((file_map.last().unwrap().2.0 as u64 + file_map.last().unwrap().3) as u32)
+                - offset;
 
-        let _ = tokio::task::spawn_blocking(move || -> Result<()>  {
+        let _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length))?;
             let byte_len = 256 * 4096 * 4096;
             let mut buf = bytes::BytesMut::with_capacity(byte_len);
@@ -503,9 +514,7 @@ impl Package {
     }
 }
 
-pub async fn stream_fast<ReaderFactory>(
-    reader: ReaderFactory,
-) -> Result<Package>
+pub async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<Package>
 where
     ReaderFactory: RangeReaderFactory + Send + 'static,
 {
@@ -774,7 +783,11 @@ struct ChannelReader {
 
 impl ChannelReader {
     fn read_full(&mut self, b: &mut [u8]) -> Result<()> {
-        self.remaining_b = Some(read_full(&mut self.in_prov_valid, b, self.remaining_b.take())?);
+        self.remaining_b = Some(read_full(
+            &mut self.in_prov_valid,
+            b,
+            self.remaining_b.take(),
+        )?);
         Ok(())
     }
 }
@@ -985,7 +998,10 @@ impl<'t> HashedReader<'t> {
         let mut sha = sha2::Sha256::new();
         sha.update(&self.hash_buffer);
         if sha.finalize()[0..20] != c.block_hash {
-            println!("SHA Mismatch HT! at expect follow up warnings {}", self.stream_pos);
+            println!(
+                "SHA Mismatch HT! at expect follow up warnings {}",
+                self.stream_pos
+            );
         }
         Ok(())
     }

@@ -111,16 +111,16 @@ fn file_reader(
         let mut pos = start;
         assert!(start <= end || end == 0, "{start} {end}");
         let byte_len = 16 * 4096 * 4096;
-        let mut buf = bytes::BytesMut::with_capacity(32 * byte_len);
-        buf.resize(buf.capacity(), 0u8);
         let mut b = VecDeque::with_capacity(32);
-        for _ in 0..32 {
-            b.push_back(buf.split_to(byte_len).freeze());
-        }
+        // Now dynamically allocate the queue
+        b.push_back(BytesMut::zeroed(byte_len).freeze());
 
         loop {
             // Try to reclaim buffer from dequeue or reallocate
-            let mut buf: BytesMut = b.pop_front().to_result("empty queue?")?.into();
+            let mut buf = b.pop_front().to_result("empty queue?")?.try_into_mut().unwrap_or_else(|value|{
+                b.push_front(value);
+                BytesMut::zeroed(byte_len)
+            });
             let max_read = if end == 0 {
                 buf.len()
             } else {
@@ -842,7 +842,7 @@ impl<'t> HashedReader<'t> {
         ReaderFactory: RangeReaderFactory,
     {
         let xvc_info_reader = {
-            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(10);
+            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(5);
             reader.new(
                 out_io,
                 data_start.to_bytes().0 as usize,
@@ -873,7 +873,7 @@ impl<'t> HashedReader<'t> {
         .to_bytes()
         .0 as usize;
         let hash_reader = {
-            let (hash_io, in_hash) = mpsc::channel::<Bytes>(10);
+            let (hash_io, in_hash) = mpsc::channel::<Bytes>(1);
             reader.new(
                 hash_io,
                 hash_bytes_start,

@@ -5,6 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Div;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aes::cipher::KeyInit;
@@ -25,8 +26,8 @@ use crate::layout::{PAGE_SIZE, Pages};
 use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, XvdLayout};
 use crate::models::xvd::{
     HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionSpecifier, XvdHashEntry, XvdHeader,
-    XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdUserDataHeader,
-    XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
+    XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -59,14 +60,30 @@ async fn start_stream(
     }
 }
 
+struct ChunkProgress {
+    id: u32,
+    current: AtomicUsize,
+    start: usize,
+    end: usize,
+}
+
 fn http_reader(
     c2: Client,
     urls: Vec<String>,
     out_io: Sender<Bytes>,
     start: usize,
     end: usize,
+    // progress: Arc<ChunkProgress>,
 ) -> JoinHandle<Result<()>> {
+    let progress: Arc<ChunkProgress> = Arc::new(ChunkProgress {
+        id: 0,
+        current: AtomicUsize::new(0),
+        start: start,
+        end: end,
+    });
+    let t_progress = progress.clone();
     tokio::spawn(async move {
+        println!("Fetch for data ({start}/{end})");
         let stall_timeout = Duration::from_secs(5);
         let mut v = start;
         let urls_len: usize = urls.len();
@@ -77,6 +94,8 @@ fn http_reader(
             if v > end && end != 0 {
                 return Ok(());
             }
+            t_progress.current.store(v, Ordering::SeqCst);
+            // println!("Poll for data ({v}/{end})");
             let next = if let Some(s) = stream.as_mut() {
                 timeout(stall_timeout, s.next()).await
             } else {
@@ -93,10 +112,26 @@ fn http_reader(
             }
 
             v += data.len();
-
+            // println!("Received {}Bytes ({v}/{end}) {}%", data.len(), 100f64 * (v - start) as f64 / (end - start) as f64 );
             out_io.send(data).await?;
         }
     })
+}
+
+enum Command {
+    Pause,
+    Continue,
+    DownloadChunk(u32),
+    DownloadFile(String),
+    DownloadAll,
+}
+
+struct Progress {
+    current: AtomicU64,
+    start: AtomicU64,
+    end: AtomicU64,
+    tx: mpsc::Sender<Command>,
+    rx: mpsc::Receiver<Command>,
 }
 
 fn file_reader(
@@ -117,10 +152,14 @@ fn file_reader(
 
         loop {
             // Try to reclaim buffer from dequeue or reallocate
-            let mut buf = b.pop_front().to_result("empty queue?")?.try_into_mut().unwrap_or_else(|value|{
-                b.push_front(value);
-                BytesMut::zeroed(byte_len)
-            });
+            let mut buf = b
+                .pop_front()
+                .to_result("empty queue?")?
+                .try_into_mut()
+                .unwrap_or_else(|value| {
+                    b.push_front(value);
+                    BytesMut::zeroed(byte_len)
+                });
             let max_read = if end == 0 {
                 buf.len()
             } else {
@@ -220,7 +259,7 @@ fn fetch_and_verify_top_level<ReaderFactory>(
 where
     ReaderFactory: RangeReaderFactory,
 {
-    let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
+    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(
         out_io,
         (layout.hash_tree.start + top_level.page_range.start)
@@ -231,8 +270,12 @@ where
             .0 as usize
             - 1,
     );
+    let mut hash_reader = ChannelReader {
+        in_prov_valid,
+        remaining_b: None,
+    };
     let mut l3_hashs = vec![0u8; 4096];
-    read_full(&mut in_prov_valid, &mut l3_hashs, None)?;
+    hash_reader.read_full(&mut l3_hashs)?;
     let mut sha = sha2::Sha256::new();
     sha.update(&l3_hashs);
     if sha.finalize()[0..32] != *top_level_hash {
@@ -250,7 +293,7 @@ fn fetch_and_verify_hash_level<ReaderFactory>(
 where
     ReaderFactory: RangeReaderFactory,
 {
-    let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
+    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(
         out_io,
         (layout.hash_tree.start + lower_level.page_range.start)
@@ -261,10 +304,14 @@ where
             .0 as usize
             - 1,
     );
+    let mut hash_reader = ChannelReader {
+        in_prov_valid,
+        remaining_b: None,
+    };
 
     let mut l2_hashs = Vec::with_capacity(lower_level.num_pages().to_bytes().0 as usize);
     l2_hashs.resize(l2_hashs.capacity(), 0u8);
-    read_full(&mut in_prov_valid, &mut l2_hashs, None)?;
+    hash_reader.read_full(&mut l2_hashs)?;
     for (i, c) in upper_hashs
         .chunks_exact(4096)
         .flat_map(|p| p.chunks_exact(HASH_ENTRY_LENGTH))
@@ -286,7 +333,7 @@ pub struct Package {
     pub hashes: Arc<Vec<u8>>,
     pub package_full_name: String,
     pub xvc_info: XvcInfo,
-    pub sfiles: Vec<(String, u64, u64, u64)>,
+    pub sfiles: Vec<(String, u64, u64, u64, bool)>,
     pub region_headers: Vec<XvcRegionHeader>,
     pub region_specs: Vec<XvcRegionSpecifier>,
     pub region_flags: Vec<u32>,
@@ -350,7 +397,7 @@ impl Package {
         let header = self.xvd_header.clone();
         let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
         let mut region_offset = 0;
-        for (i, (entry, bs, _, ps)) in (&self.sfiles).iter().enumerate() {
+        for (i, (entry, bs, _, ps, _)) in (&self.sfiles).iter().enumerate() {
             while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
                 region_headers = &region_headers[1..];
                 region_offset = 0;
@@ -414,48 +461,58 @@ impl Package {
         let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
         let mut region_offset = region_headers[0].offset;
         let mut file_map = Vec::new();
-        for (i, (entry, bs, _, ps)) in (&self.sfiles).iter().enumerate() {
+        let mut region_list = &mut file_map.push_mut((region_headers[0].clone(), Vec::new())).1;
+        for (i, (entry, bs, _, ps, e)) in (&self.sfiles).iter().enumerate() {
             while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
                 region_headers = &region_headers[1..];
                 region_offset = region_headers[0].offset;
+                region_list = &mut file_map.push_mut((region_headers[0].clone(), Vec::new())).1;
             }
             let o = region_offset;
             let ps = *ps;
             let bs = *bs;
-            let region = region_headers[0].clone();
-            file_map.push((region, entry.to_string(), o, ps, bs));
+            region_list.push((entry.to_string(), o, ps, bs, *e));
             region_offset += Pages(ps as u32);
         }
         let offset = Pages(file_map.first().unwrap().0.offset.0 as u32);
-        let length =
-            Pages((file_map.last().unwrap().2.0 as u64 + file_map.last().unwrap().3) as u32)
-                - offset;
+        let length = Pages(
+            (file_map.last().unwrap().1.last().unwrap().1.0 as u64
+                + file_map.last().unwrap().1.last().unwrap().2) as u32,
+        ) - offset;
 
         let _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length))?;
             let byte_len = 256 * 4096 * 4096;
             let mut buf = bytes::BytesMut::with_capacity(byte_len);
             buf.resize(byte_len, 0);
-            for (region, entry, o, ps, bs) in file_map {
-                hr.assert_position(o.to_bytes().0 as usize);
-                let file_name = PathBuf::from(&destination).join(entry.replace("\\", "/"));
-                std::fs::create_dir_all(file_name.parent().to_result("no parent")?)?;
-                let mut fout = File::create(file_name)?;
-                if region.key_id.is_encrypted() && hr.decryption.is_none() {
-                    hr.decryption = full_key
-                        .map(|full_key| DecryptionsRuntime::new(&header, &region, full_key));
+            for (region, files) in file_map {
+                let mut decryption = if region.key_id.is_encrypted() {
+                    full_key.map(|full_key| DecryptionsRuntime::new(&header, &region, full_key))
+                } else {
+                    None
+                };
+                for (entry, o, ps, bs, e) in files {
+                    hr.assert_position(o.to_bytes().0 as usize);
+                    let file_name = PathBuf::from(&destination).join(entry.replace("\\", "/"));
+                    std::fs::create_dir_all(file_name.parent().to_result("no parent")?)?;
+                    let mut fout = File::create(file_name)?;
+                    if hr.decryption.is_none() && !e {
+                        hr.decryption = decryption.take();
+                    } else if decryption.is_none() {
+                        decryption = hr.decryption.take();
+                    }
+                    let mut written = 0;
+                    while written < ps {
+                        let bytes_to_copy = min(buf.len(), ((ps - written) * 4096) as usize);
+                        hr.read_full(&mut buf[..bytes_to_copy])?;
+                        fout.write_all(&buf[..bytes_to_copy])?;
+                        written += (bytes_to_copy / 4096) as u64;
+                    }
+                    if !region.key_id.is_encrypted() || full_key.is_some() {
+                        fout.set_len(bs)?;
+                    }
+                    fout.sync_all()?;
                 }
-                let mut written = 0;
-                while written < ps {
-                    let bytes_to_copy = min(buf.len(), ((ps - written) * 4096) as usize);
-                    hr.read_full(&mut buf[..bytes_to_copy])?;
-                    fout.write_all(&buf[..bytes_to_copy])?;
-                    written += (bytes_to_copy / 4096) as u64;
-                }
-                if !region.key_id.is_encrypted() || full_key.is_some() {
-                    fout.set_len(bs)?;
-                }
-                fout.sync_all()?;
             }
             Ok(())
         })
@@ -476,7 +533,7 @@ impl Package {
         let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
         let mut region_offset = region_headers[0].offset;
         let mut file_map = Vec::new();
-        for (i, (entry, bs, _, ps)) in (&self.sfiles).iter().enumerate() {
+        for (i, (entry, bs, _, ps, _)) in (&self.sfiles).iter().enumerate() {
             while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
                 region_headers = &region_headers[1..];
                 region_offset = region_headers[0].offset;
@@ -495,7 +552,7 @@ impl Package {
 
         let _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length))?;
-            let byte_len = 256 * 4096 * 4096;
+            let byte_len = 64 * 1024 * 1024;
             let mut buf = bytes::BytesMut::with_capacity(byte_len);
             buf.resize(byte_len, 0);
             for (_, _, o, ps, _) in file_map {
@@ -505,6 +562,10 @@ impl Package {
                     let bytes_to_copy = min(buf.len(), ((ps - written) * 4096) as usize);
                     hr.read_full(&mut buf[..bytes_to_copy])?;
                     written += (bytes_to_copy / 4096) as u64;
+                    println!(
+                        "progress {}%",
+                        100f64 * (o + Pages(written as u32) - offset).0 as f64 / length.0 as f64
+                    );
                 }
             }
             Ok(())
@@ -518,12 +579,16 @@ pub async fn stream_fast<ReaderFactory>(reader: ReaderFactory) -> Result<Package
 where
     ReaderFactory: RangeReaderFactory + Send + 'static,
 {
-    let (out_io, mut in_prov_valid) = mpsc::channel::<Bytes>(100);
+    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
     reader.new(out_io, 0, 4096);
+    let mut header_reader = ChannelReader {
+        in_prov_valid,
+        remaining_b: None,
+    };
     let r = tokio::task::spawn_blocking(move || {
         (|| -> Result<Package> {
             let mut xvd_header_buf = XvdHeader::buffer();
-            let _ = read_full(&mut in_prov_valid, &mut xvd_header_buf, None);
+            header_reader.read_full(&mut xvd_header_buf)?;
             let xvd_header = XvdHeader::try_from_array(&xvd_header_buf)?;
             let layout = xvd_header.layout();
             let target_offset = layout.user_data.start.to_bytes().0 as usize;
@@ -657,7 +722,15 @@ where
                             } else {
                                 segment.filesize.div_ceil(PAGE_SIZE as u64)
                             };
-                            sfiles.push((file_name, segment.filesize, page_offset, page_length));
+                            sfiles.push((
+                                file_name,
+                                segment.filesize,
+                                page_offset,
+                                page_length,
+                                segment.flags.contains(
+                                    XvdSegmentMetadataSegmentFlags::KEEP_ENCRYPTED_ON_DISK,
+                                ),
+                            ));
                             page_offset += page_length;
                         }
                     } else if file.ends_with(".config") || file.ends_with(".json") {
@@ -817,6 +890,31 @@ impl DecryptionsRuntime {
     }
 }
 
+// fn write<T: Write>(x: &[u8]) {
+
+// }
+
+// fn write<T: ~Write>(x: &[u8]) {
+
+// }
+
+/*
+TODO
+- RepairReaderFactory e.g. reader for remote file
+  - to e.g. fix local msixvc and installation
+- A ReaderFactory that reconstruct l0 hashs based on filesystem to fix installation
+  - Maybe needs the remote url for file layout
+  - Maybe needs a local cached xodus streaming of residient regions
+- A ReaderFactory that reads l0 hashs directly from cache
+  - Needs a local cached xodus streaming of residient regions
+- A way to e.g. compare and update local files missing / problem copying file data that needs no change seems to be useless
+
+
+- Add multiple input streams
+- Option to not read data if not corrupted (load_data_if_missmatch?)
+- Option to call the writer here especially for the hashs themself
+ */
+
 struct HashedReader<'t> {
     buffer: [u8; 4096],
     buffered_len: usize,
@@ -842,7 +940,7 @@ impl<'t> HashedReader<'t> {
         ReaderFactory: RangeReaderFactory,
     {
         let xvc_info_reader = {
-            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(5);
+            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(4);
             reader.new(
                 out_io,
                 data_start.to_bytes().0 as usize,
@@ -873,7 +971,7 @@ impl<'t> HashedReader<'t> {
         .to_bytes()
         .0 as usize;
         let hash_reader = {
-            let (hash_io, in_hash) = mpsc::channel::<Bytes>(1);
+            let (hash_io, in_hash) = mpsc::channel::<Bytes>(2);
             reader.new(
                 hash_io,
                 hash_bytes_start,

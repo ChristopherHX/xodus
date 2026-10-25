@@ -1033,7 +1033,10 @@ impl<'t> HashedReader<'t> {
                     });
                 }
                 if sha.finalize()[0..20] != c.block_hash {
-                    println!("SHA Mismatch at {}", self.stream_pos);
+                    Err(std::io::Error::other(format!(
+                        "SHA Mismatch at {}",
+                        self.stream_pos
+                    )))?;
                 }
             }
         }
@@ -1065,10 +1068,10 @@ impl<'t> HashedReader<'t> {
         let mut sha = sha2::Sha256::new();
         sha.update(&self.hash_buffer);
         if sha.finalize()[0..20] != c.block_hash {
-            println!(
+            Err(std::io::Error::other(format!(
                 "SHA Mismatch HT! at expect follow up warnings {}",
                 self.stream_pos
-            );
+            )))?;
         }
         Ok(())
     }

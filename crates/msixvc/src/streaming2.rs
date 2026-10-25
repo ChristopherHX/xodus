@@ -280,7 +280,7 @@ where
     let mut sha = sha2::Sha256::new();
     sha.update(&l3_hashs);
     if sha.finalize()[0..32] != *top_level_hash {
-        panic!("TODO");
+        Err(std::io::Error::other("Top Level Hash Table Mismatch"))?;
     }
     Ok(l3_hashs)
 }

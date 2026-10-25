@@ -425,7 +425,6 @@ impl Package {
     {
         if self.sfiles.is_empty() {
             Err(std::io::Error::other("legacy file requires NTFS"))?;
-            return Ok(());
         }
         let hashes = self.hashes.clone();
         let layout = self.xvd_header.layout();
@@ -466,6 +465,9 @@ impl Package {
                 })
                 .collect()
         });
+        if file_map.first().is_none_or(|(_, l)| l.is_empty()) {
+            Err(std::io::Error::other("Filter not found"))?;
+        }
         let offset = Pages(file_map.first().unwrap().0.offset.0 as u32);
         let length = Pages(
             (file_map.last().unwrap().1.last().unwrap().1.0 as u64

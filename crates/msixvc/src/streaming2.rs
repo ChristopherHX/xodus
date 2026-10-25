@@ -250,6 +250,7 @@ impl RangeReaderFactory for HttpReaderFactory {
     }
 }
 
+// TODO Fixme refactor hashreader
 fn fetch_and_verify_top_level<ReaderFactory>(
     reader: &ReaderFactory,
     layout: &XvdLayout,
@@ -259,7 +260,7 @@ fn fetch_and_verify_top_level<ReaderFactory>(
 where
     ReaderFactory: RangeReaderFactory,
 {
-    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
+    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(10);
     reader.new(
         out_io,
         (layout.hash_tree.start + top_level.page_range.start)
@@ -284,6 +285,7 @@ where
     Ok(l3_hashs)
 }
 
+// TODO Fixme HashReader and reuse it here
 fn fetch_and_verify_hash_level<ReaderFactory>(
     reader: &ReaderFactory,
     layout: &XvdLayout,
@@ -293,7 +295,7 @@ fn fetch_and_verify_hash_level<ReaderFactory>(
 where
     ReaderFactory: RangeReaderFactory,
 {
-    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(100);
+    let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(10);
     reader.new(
         out_io,
         (layout.hash_tree.start + lower_level.page_range.start)
@@ -309,9 +311,9 @@ where
         remaining_b: None,
     };
 
-    let mut l2_hashs = Vec::with_capacity(lower_level.num_pages().to_bytes().0 as usize);
-    l2_hashs.resize(l2_hashs.capacity(), 0u8);
-    hash_reader.read_full(&mut l2_hashs)?;
+    let mut lower_hashs = Vec::with_capacity(lower_level.num_pages().to_bytes().0 as usize);
+    lower_hashs.resize(lower_hashs.capacity(), 0u8);
+    hash_reader.read_full(&mut lower_hashs)?;
     for (i, c) in upper_hashs
         .chunks_exact(4096)
         .flat_map(|p| p.chunks_exact(HASH_ENTRY_LENGTH))
@@ -320,12 +322,12 @@ where
         .enumerate()
     {
         let mut sha = sha2::Sha256::new();
-        sha.update(&l2_hashs[i * 4096..(i + 1) * 4096]);
+        sha.update(&lower_hashs[i * 4096..(i + 1) * 4096]);
         if sha.finalize()[0..20] != c.block_hash {
-            panic!("TODO");
+            Err(std::io::Error::other("Hash Table Mismatch"))?;
         }
     }
-    Ok(l2_hashs)
+    Ok(lower_hashs)
 }
 
 pub struct Package {
@@ -649,10 +651,10 @@ where
             hr.read_full(&mut buf)?;
             let user_data_header = XvdUserDataHeader::from_array(&buf);
             if user_data_header.t != 0 {
-                return Err(Box::new(std::io::Error::new(
+                Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "error",
-                )));
+                ))?;
             }
             let mut sfiles = Vec::new();
             let mut package_files = HashMap::<String, String>::new();
@@ -747,10 +749,10 @@ where
             };
 
             if layout.xvc_info.len.0 == 0 {
-                return Err(Box::new(std::io::Error::new(
+                Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "error",
-                )));
+                ))?;
             }
             let (xvc_info, region_headers, region_specs, region_flags) = {
                 let xvc_info = {
@@ -846,7 +848,8 @@ fn read_full(
             return Ok(b);
         }
     }
-    Err(Box::new(std::io::Error::other("Early EOF")))
+    Err(std::io::Error::other("Early EOF"))?;
+    unreachable!();
 }
 
 struct ChannelReader {

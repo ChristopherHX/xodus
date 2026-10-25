@@ -395,7 +395,7 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_ext(reader, destination, full_key, None, Some(file_name))
+        self.download_ext(reader, Some(destination), full_key, None, Some(file_name))
             .await
     }
 
@@ -408,14 +408,14 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_ext(reader, destination, full_key, None, None)
+        self.download_ext(reader, Some(destination), full_key, None, None)
             .await
     }
 
     pub async fn download_ext<ReaderFactory>(
         &self,
         reader: ReaderFactory,
-        destination: String,
+        destination: Option<String>,
         full_key: Option<[u8; 32]>,
         region_id: Option<XvcRegionId>,
         file_name: Option<String>,
@@ -485,9 +485,14 @@ impl Package {
                 };
                 for (entry, o, ps, bs, e) in files {
                     hr.assert_position(o.to_bytes().0 as usize);
-                    let file_name = PathBuf::from(&destination).join(entry.replace("\\", "/"));
-                    std::fs::create_dir_all(file_name.parent().to_result("no parent")?)?;
-                    let mut fout = File::create(file_name)?;
+                    let mut fout = if destination.is_some() {
+                        let file_name = PathBuf::from(destination.as_ref().unwrap())
+                            .join(entry.replace("\\", "/"));
+                        std::fs::create_dir_all(file_name.parent().to_result("no parent")?)?;
+                        Some(File::create(file_name)?)
+                    } else {
+                        None
+                    };
                     if hr.decryption.is_none() && !e {
                         hr.decryption = decryption.take();
                     } else if decryption.is_none() {
@@ -497,13 +502,17 @@ impl Package {
                     while written < ps {
                         let bytes_to_copy = min(buf.len(), ((ps - written) * 4096) as usize);
                         hr.read_full(&mut buf[..bytes_to_copy])?;
-                        fout.write_all(&buf[..bytes_to_copy])?;
+                        if fout.is_some() {
+                            fout.as_mut().unwrap().write_all(&buf[..bytes_to_copy])?;
+                        }
                         written += (bytes_to_copy / 4096) as u64;
                     }
-                    if !region.key_id.is_encrypted() || full_key.is_some() {
-                        fout.set_len(bs)?;
+                    if fout.is_some() {
+                        if !region.key_id.is_encrypted() || full_key.is_some() {
+                            fout.as_mut().unwrap().set_len(bs)?;
+                        }
+                        fout.as_mut().unwrap().sync_all()?;
                     }
-                    fout.sync_all()?;
                 }
             }
             Ok(())
@@ -522,7 +531,7 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_ext(reader, destination, full_key, Some(region_id), None)
+        self.download_ext(reader, Some(destination), full_key, Some(region_id), None)
             .await
     }
 
@@ -530,54 +539,7 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        if self.sfiles.is_empty() {
-            Err(std::io::Error::other("legacy file requires NTFS"))?;
-            return Ok(());
-        }
-        let hashes = self.hashes.clone();
-        let layout = self.xvd_header.layout();
-        let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
-        let mut region_offset = region_headers[0].offset;
-        let mut file_map = Vec::new();
-        for (i, (entry, bs, _, ps, _)) in (&self.sfiles).iter().enumerate() {
-            while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
-                region_headers = &region_headers[1..];
-                region_offset = region_headers[0].offset;
-            }
-            let o = region_offset;
-            let ps = *ps;
-            let bs = *bs;
-            let region = region_headers[0].clone();
-            file_map.push((region, entry.to_string(), o, ps, bs));
-            region_offset += Pages(ps as u32);
-        }
-        let offset = Pages(file_map.first().unwrap().0.offset.0 as u32);
-        let length =
-            Pages((file_map.last().unwrap().2.0 as u64 + file_map.last().unwrap().3) as u32)
-                - offset;
-
-        let _ = tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length))?;
-            let byte_len = 64 * 1024 * 1024;
-            let mut buf = bytes::BytesMut::with_capacity(byte_len);
-            buf.resize(byte_len, 0);
-            for (_, _, o, ps, _) in file_map {
-                hr.assert_position(o.to_bytes().0 as usize);
-                let mut written = 0;
-                while written < ps {
-                    let bytes_to_copy = min(buf.len(), ((ps - written) * 4096) as usize);
-                    hr.read_full(&mut buf[..bytes_to_copy])?;
-                    written += (bytes_to_copy / 4096) as u64;
-                    println!(
-                        "progress {}%",
-                        100f64 * (o + Pages(written as u32) - offset).0 as f64 / length.0 as f64
-                    );
-                }
-            }
-            Ok(())
-        })
-        .await?;
-        Ok(())
+        self.download_ext(reader, None, full_key, None, None).await
     }
 }
 

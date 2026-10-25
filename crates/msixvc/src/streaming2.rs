@@ -25,9 +25,7 @@ use crate::crypt::{TweakGenerator, decrypt_page_xts};
 use crate::layout::{PAGE_SIZE, Pages};
 use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, XvdLayout};
 use crate::models::xvd::{
-    HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionSpecifier, XvdHashEntry, XvdHeader,
-    XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
-    XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionId, XvcRegionSpecifier, XvdHashEntry, XvdHeader, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags, XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -453,6 +451,19 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
+        self.download_segment(reader, destination, full_key, None).await
+    }
+
+    pub async fn download_segment<ReaderFactory>(
+        &self,
+        reader: ReaderFactory,
+        destination: String,
+        full_key: Option<[u8; 32]>,
+        region_id: Option<XvcRegionId>,
+    ) -> Result<()>
+    where
+        ReaderFactory: RangeReaderFactory + Send + 'static,
+    {
         if self.sfiles.is_empty() {
             Err(std::io::Error::other("legacy file requires NTFS"))?;
             return Ok(());
@@ -476,6 +487,7 @@ impl Package {
             region_list.push((entry.to_string(), o, ps, bs, *e));
             region_offset += Pages(ps as u32);
         }
+        region_id.map(|region_id| file_map = file_map.iter().filter(|(s,_)| s.region_id == region_id).cloned().collect());
         let offset = Pages(file_map.first().unwrap().0.offset.0 as u32);
         let length = Pages(
             (file_map.last().unwrap().1.last().unwrap().1.0 as u64

@@ -539,7 +539,7 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_ext(reader, None, full_key, None, None).await
+        self.download_ext(reader, None, None, None, None).await
     }
 }
 

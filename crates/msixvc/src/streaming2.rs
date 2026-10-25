@@ -25,7 +25,9 @@ use crate::crypt::{TweakGenerator, decrypt_page_xts};
 use crate::layout::{PAGE_SIZE, Pages};
 use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, XvdLayout};
 use crate::models::xvd::{
-    HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionId, XvcRegionSpecifier, XvdHashEntry, XvdHeader, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags, XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionId, XvcRegionSpecifier, XvdHashEntry,
+    XvdHeader, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
+    XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -387,59 +389,14 @@ impl Package {
         &self,
         reader: ReaderFactory,
         file_name: String,
+        destination: String,
         full_key: Option<[u8; 32]>,
     ) -> Result<()>
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        let hashes = self.hashes.clone();
-        let layout = self.xvd_header.layout();
-        let header = self.xvd_header.clone();
-        let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
-        let mut region_offset = 0;
-        for (i, (entry, bs, _, ps, _)) in (&self.sfiles).iter().enumerate() {
-            while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
-                region_headers = &region_headers[1..];
-                region_offset = 0;
-            }
-            if *entry != file_name {
-                region_offset += *ps;
-                continue;
-            }
-            let o = region_offset as u64;
-            let ps = *ps;
-            let bs = *bs;
-            let region = region_headers[0].clone();
-            let _ = tokio::task::spawn_blocking(move || -> Result<()> {
-                let mut fout = File::create(&file_name)?;
-                let mut hr = HashedReader::new(
-                    &reader,
-                    &hashes,
-                    &layout,
-                    region.offset + Pages(o as u32),
-                    Some(Pages(ps as u32)),
-                )?;
-                if region.key_id.is_encrypted() {
-                    hr.decryption = full_key
-                        .map(|full_key| DecryptionsRuntime::new(&header, &region, full_key));
-                }
-                let mut buf = [0u8; 4096];
-                let mut written = 0;
-                while written < ps {
-                    hr.read_full(&mut buf)?;
-                    fout.write_all(&buf)?;
-                    written += 1;
-                }
-                if !region.key_id.is_encrypted() || full_key.is_some() {
-                    fout.set_len(bs)?;
-                }
-                fout.sync_all()?;
-                Ok(())
-            })
-            .await?;
-            break;
-        }
-        Ok(())
+        self.download_ext(reader, destination, full_key, None, Some(file_name))
+            .await
     }
 
     pub async fn download_all<ReaderFactory>(
@@ -451,15 +408,17 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_segment(reader, destination, full_key, None).await
+        self.download_ext(reader, destination, full_key, None, None)
+            .await
     }
 
-    pub async fn download_segment<ReaderFactory>(
+    pub async fn download_ext<ReaderFactory>(
         &self,
         reader: ReaderFactory,
         destination: String,
         full_key: Option<[u8; 32]>,
         region_id: Option<XvcRegionId>,
+        file_name: Option<String>,
     ) -> Result<()>
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
@@ -487,7 +446,26 @@ impl Package {
             region_list.push((entry.to_string(), o, ps, bs, *e));
             region_offset += Pages(ps as u32);
         }
-        region_id.map(|region_id| file_map = file_map.iter().filter(|(s,_)| s.region_id == region_id).cloned().collect());
+        region_id.map(|region_id| {
+            file_map = file_map
+                .iter()
+                .filter(|(s, _)| s.region_id == region_id)
+                .cloned()
+                .collect()
+        });
+        file_name.map(|file_name| {
+            file_map = file_map
+                .iter()
+                .filter_map(|(r, l)| {
+                    for entry in l {
+                        if entry.0 == file_name {
+                            return Some((r.clone(), vec![(*entry).clone()]));
+                        }
+                    }
+                    return None;
+                })
+                .collect()
+        });
         let offset = Pages(file_map.first().unwrap().0.offset.0 as u32);
         let length = Pages(
             (file_map.last().unwrap().1.last().unwrap().1.0 as u64
@@ -532,6 +510,20 @@ impl Package {
         })
         .await?;
         Ok(())
+    }
+
+    pub async fn download_region<ReaderFactory>(
+        &self,
+        reader: ReaderFactory,
+        destination: String,
+        full_key: Option<[u8; 32]>,
+        region_id: XvcRegionId,
+    ) -> Result<()>
+    where
+        ReaderFactory: RangeReaderFactory + Send + 'static,
+    {
+        self.download_ext(reader, destination, full_key, Some(region_id), None)
+            .await
     }
 
     pub async fn check_all<ReaderFactory>(&self, reader: ReaderFactory) -> Result<()>

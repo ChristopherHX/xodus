@@ -398,58 +398,12 @@ pub struct GdkMetadata {
 
 impl Package {
     pub fn get_progress(&self, selectors: Vec<ChunkSelector>) -> Result<(usize, usize, usize)> {
-        let metadata = if let Some(metadata) = self.package_files.get("Metadata.json") {
-            serde_json::from_str::<GdkMetadata>(metadata.as_str())?
-        } else {
-            GdkMetadata{ install_features: vec![], install_recipes: vec![] }
-        };
         let registry = self
             .progress
             .registry
             .lock()
             .map_err(|_| std::io::Error::other("ukn"))?;
-        let file_map = self.build_file_map();
-        for (region, _) in &file_map {
-            for selector in &selectors {
-                if match selector {
-                    ChunkSelector::Chunk(xvc_region_id) => region.region_id == *xvc_region_id,
-                    _ => {
-                        let (key, value) = match selector {
-                            ChunkSelector::Language(v) => ("Languages", v.as_str()),
-                            ChunkSelector::Tag(v) => ("Tags", v.as_str()),
-                            _ => ("", ""),
-                        };
-                        let mut m = false;
-                        if !key.is_empty() {
-                            for s in self
-                                .region_specs
-                                .iter()
-                                .filter(|s| region.region_id == s.region_id)
-                            {
-                                let kl = s.key.iter().take_while(|c| **c != 0).count();
-                                let vl = s.value.iter().take_while(|c| **c != 0).count();
-                                let value_src = String::from_utf16(&s.value[..vl])
-                                    .unwrap_or_else(|_| "<error>".to_owned());
-                                if key
-                                    == String::from_utf16(&s.key[..kl])
-                                        .unwrap_or_else(|_| "<error>".to_owned())
-                                {
-                                    for vs in value_src.split(";") {
-                                        if vs.split("#").all(|v| v == value) {
-                                            m = true;
-                                            break;
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                        m
-                    }
-                } {}
-            }
-        }
-
+        let file_map = self.build_file_map_for_selector(selectors);
         Ok((0, 0, 0))
     }
 
@@ -529,6 +483,76 @@ impl Package {
             region_offset += Pages(ps as u32);
         }
         file_map
+    }
+
+    fn build_file_map_for_selector(
+        &self,
+        selectors: Vec<ChunkSelector>,
+    ) -> Result<Vec<(XvcRegionHeader, Vec<(String, Pages, u64, u64, bool)>)>> {
+        let metadata = if let Some(metadata) = self.package_files.get("Metadata.json") {
+            serde_json::from_str::<GdkMetadata>(metadata.as_str())?
+        } else {
+            GdkMetadata {
+                install_features: vec![],
+                install_recipes: vec![],
+            }
+        };
+
+        let mut extra_tags = Vec::new();
+        for selector in selectors {
+            if let ChunkSelector::Feature(feature) = selector {
+                if let Some(r) = metadata.install_features.iter().find(|f| f.id == feature) {
+                    for tag in r.tags.split(";") {
+                        extra_tags.push(ChunkSelector::Tag(tag.to_owned()));
+                    }
+                }
+            } else {
+                extra_tags.push(selector);
+            }
+        }
+        let file_map = Vec::new();
+        for (region, _) in self.build_file_map() {
+            for selector in &extra_tags {
+                if match selector {
+                    ChunkSelector::Chunk(xvc_region_id) => region.region_id == *xvc_region_id,
+                    _ => {
+                        let (key, value) = match selector {
+                            ChunkSelector::Language(v) => ("Languages", v.as_str()),
+                            ChunkSelector::Tag(v) => ("Tags", v.as_str()),
+                            _ => ("", ""),
+                        };
+                        let mut m = false;
+                        if !key.is_empty() {
+                            for s in self
+                                .region_specs
+                                .iter()
+                                .filter(|s| region.region_id == s.region_id)
+                            {
+                                let kl = s.key.iter().take_while(|c| **c != 0).count();
+                                let vl = s.value.iter().take_while(|c| **c != 0).count();
+                                let value_src = String::from_utf16(&s.value[..vl])
+                                    .unwrap_or_else(|_| "<error>".to_owned());
+                                if key
+                                    == String::from_utf16(&s.key[..kl])
+                                        .unwrap_or_else(|_| "<error>".to_owned())
+                                {
+                                    for vs in value_src.split(";") {
+                                        if vs.split("#").all(|v| v == value) {
+                                            m = true;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        m
+                    }
+                } {}
+            }
+        }
+
+        Ok(file_map)
     }
 
     pub async fn download_ext<ReaderFactory>(

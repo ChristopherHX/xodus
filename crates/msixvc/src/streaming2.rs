@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use aes::cipher::KeyInit;
 use aes::{Aes128Dec, Aes128Enc};
 use bytes::{Bytes, BytesMut};
@@ -369,6 +370,31 @@ pub enum ChunkSelector {
     Tag(String),
     Chunk(XvcRegionId),
     Feature(String),
+}
+
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct GdkFeature {
+    pub id: String,
+    #[serde(default)]
+    pub hidden: bool,
+    pub tags: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct GdkRecipe {
+    pub id: String,
+    // comma separated list
+    pub included_features: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct GdkMetadata {
+    pub install_features: Vec<GdkFeature>,
+    pub install_recipes: Vec<GdkRecipe>,
 }
 
 impl Package {
@@ -1162,4 +1188,12 @@ impl<'t> HashedReader<'t> {
     fn assert_position(&self, pos: usize) {
         assert!(self.stream_pos == pos, "{} vs {}", self.stream_pos, pos);
     }
+}
+
+#[test]
+fn test_metadata() {
+    let input = r#"{"InstallFeatures": [{ "Id": "SignLanguageBSL", "DisplayName": "BSL Sign Language Packs", "Tags": "BSL" }, { "Id": "SignLanguageASL", "DisplayName": "ASL Sign Language Packs", "Tags": "ASL" }, { "Id": "OnTheDisc", "Hidden": true, "Tags": "OnDisc" }, { "Id": "OffTheDisc", "Hidden": true, "Tags": "OffDisc" }], "InstallRecipes": [{ "Id": "default", "IncludedFeatures": "OnTheDisc;OffTheDisc"}]}"#;
+    let metadata: GdkMetadata = serde_json::from_str(input).unwrap();
+    assert_eq!(metadata.install_features.len(), 4);
+    assert_eq!(metadata.install_recipes.len(), 1);
 }

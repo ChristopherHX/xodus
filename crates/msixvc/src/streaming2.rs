@@ -372,16 +372,53 @@ pub enum ChunkSelector {
 }
 
 impl Package {
-    pub fn get_progress(&self, selector: Vec<ChunkSelector>) -> Result<(usize, usize, usize)> {
+    pub fn get_progress(&self, selectors: Vec<ChunkSelector>) -> Result<(usize, usize, usize)> {
         let registry = self
             .progress
             .registry
             .lock()
-            .map_err(|e| std::io::Error::other("ukn"))?;
+            .map_err(|_| std::io::Error::other("ukn"))?;
         let file_map = self.build_file_map();
-        // for (region, _) in &file_map {
-        //     region.region_id
-        // }
+        for (region, _) in &file_map {
+            for selector in &selectors {
+                if match selector {
+                    ChunkSelector::Chunk(xvc_region_id) => region.region_id == *xvc_region_id,
+                    _ => {
+                        let (key, value) = match selector {
+                            ChunkSelector::Language(v) => ("Languages", v.as_str()),
+                            ChunkSelector::Tag(v) => ("Tags", v.as_str()),
+                            _ => ("", ""),
+                        };
+                        let mut m = false;
+                        if !key.is_empty() {
+                            for s in self
+                                .region_specs
+                                .iter()
+                                .filter(|s| region.region_id == s.region_id)
+                            {
+                                let kl = s.key.iter().take_while(|c| **c != 0).count();
+                                let vl = s.value.iter().take_while(|c| **c != 0).count();
+                                let value_src = String::from_utf16(&s.value[..vl])
+                                    .unwrap_or_else(|_| "<error>".to_owned());
+                                if key
+                                    == String::from_utf16(&s.key[..kl])
+                                        .unwrap_or_else(|_| "<error>".to_owned())
+                                {
+                                    for vs in value_src.split(";") {
+                                        if vs.split("#").all(|v| v == value) {
+                                            m = true;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        m
+                    }
+                } {}
+            }
+        }
 
         Ok((0, 0, 0))
     }

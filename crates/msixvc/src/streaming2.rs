@@ -404,6 +404,7 @@ impl Package {
             .lock()
             .map_err(|_| std::io::Error::other("ukn"))?;
         let file_map = self.build_file_map_for_selector(selectors)?;
+
         Ok((0, 0, 0))
     }
 
@@ -510,8 +511,8 @@ impl Package {
                 extra_tags.push(selector);
             }
         }
-        let file_map = Vec::new();
-        for (region, _) in self.build_file_map() {
+        let mut file_map = Vec::new();
+        for (region, v) in self.build_file_map() {
             for selector in &extra_tags {
                 if match selector {
                     ChunkSelector::Chunk(xvc_region_id) => region.region_id == *xvc_region_id,
@@ -548,7 +549,10 @@ impl Package {
                         }
                         m
                     }
-                } {}
+                } {
+                    file_map.push((region, v));
+                    break;
+                }
             }
         }
 

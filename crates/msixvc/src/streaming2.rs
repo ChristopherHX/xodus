@@ -398,6 +398,11 @@ pub struct GdkMetadata {
 
 impl Package {
     pub fn get_progress(&self, selectors: Vec<ChunkSelector>) -> Result<(usize, usize, usize)> {
+        let metadata = if let Some(metadata) = self.package_files.get("Metadata.json") {
+            serde_json::from_str::<GdkMetadata>(metadata.as_str())?
+        } else {
+            GdkMetadata{ install_features: vec![], install_recipes: vec![] }
+        };
         let registry = self
             .progress
             .registry

@@ -403,7 +403,7 @@ impl Package {
             .registry
             .lock()
             .map_err(|_| std::io::Error::other("ukn"))?;
-        let file_map = self.build_file_map_for_selector(selectors);
+        let file_map = self.build_file_map_for_selector(selectors)?;
         Ok((0, 0, 0))
     }
 

@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use aes::cipher::KeyInit;
 use aes::{Aes128Dec, Aes128Enc};
 use bytes::{Bytes, BytesMut};
@@ -16,6 +15,7 @@ use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
 use reqwest::Client;
 use reqwest::header::RANGE;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
@@ -371,7 +371,6 @@ pub enum ChunkSelector {
     Chunk(XvcRegionId),
     Feature(String),
 }
-
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]

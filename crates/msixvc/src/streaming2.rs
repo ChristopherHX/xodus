@@ -330,6 +330,16 @@ where
     Ok(lower_hashs)
 }
 
+struct RangeProgress {
+    start: usize,
+    cur: AtomicUsize,
+    end: usize,
+}
+
+struct RangeProgressManager {
+    registry: std::sync::Mutex<Vec<RangeProgress>>,
+}
+
 pub struct Package {
     pub xvd_header: XvdHeader,
     pub hashes: Arc<Vec<u8>>,
@@ -340,6 +350,7 @@ pub struct Package {
     pub region_specs: Vec<XvcRegionSpecifier>,
     pub region_flags: Vec<u32>,
     pub package_files: HashMap<String, String>,
+    progress: Arc<RangeProgressManager>,
 }
 
 trait ToResult<T> {
@@ -353,7 +364,28 @@ impl<T> ToResult<T> for Option<T> {
     }
 }
 
+pub enum ChunkSelector {
+    Language(String),
+    Tag(String),
+    Chunk(XvcRegionId),
+    Feature(String),
+}
+
 impl Package {
+    pub fn get_progress(&self, selector: Vec<ChunkSelector>) -> Result<(usize, usize, usize)> {
+        let registry = self
+            .progress
+            .registry
+            .lock()
+            .map_err(|e| std::io::Error::other("ukn"))?;
+        let file_map = self.build_file_map();
+        // for (region, _) in &file_map {
+        //     region.region_id
+        // }
+
+        Ok((0, 0, 0))
+    }
+
     pub fn dump(&self) {
         println!("package_full_name: {}", self.package_full_name);
         for (n, v) in &self.package_files {
@@ -412,6 +444,26 @@ impl Package {
             .await
     }
 
+    fn build_file_map(&self) -> Vec<(XvcRegionHeader, Vec<(String, Pages, u64, u64, bool)>)> {
+        let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
+        let mut region_offset = region_headers[0].offset;
+        let mut file_map = Vec::new();
+        let mut region_list = &mut file_map.push_mut((region_headers[0].clone(), Vec::new())).1;
+        for (i, (entry, bs, _, ps, e)) in (&self.sfiles).iter().enumerate() {
+            while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
+                region_headers = &region_headers[1..];
+                region_offset = region_headers[0].offset;
+                region_list = &mut file_map.push_mut((region_headers[0].clone(), Vec::new())).1;
+            }
+            let o = region_offset;
+            let ps = *ps;
+            let bs = *bs;
+            region_list.push((entry.to_string(), o, ps, bs, *e));
+            region_offset += Pages(ps as u32);
+        }
+        file_map
+    }
+
     pub async fn download_ext<ReaderFactory>(
         &self,
         reader: ReaderFactory,
@@ -429,22 +481,7 @@ impl Package {
         let hashes = self.hashes.clone();
         let layout = self.xvd_header.layout();
         let header = self.xvd_header.clone();
-        let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
-        let mut region_offset = region_headers[0].offset;
-        let mut file_map = Vec::new();
-        let mut region_list = &mut file_map.push_mut((region_headers[0].clone(), Vec::new())).1;
-        for (i, (entry, bs, _, ps, e)) in (&self.sfiles).iter().enumerate() {
-            while region_headers.len() > 1 && region_headers[1].first_segment_index as usize <= i {
-                region_headers = &region_headers[1..];
-                region_offset = region_headers[0].offset;
-                region_list = &mut file_map.push_mut((region_headers[0].clone(), Vec::new())).1;
-            }
-            let o = region_offset;
-            let ps = *ps;
-            let bs = *bs;
-            region_list.push((entry.to_string(), o, ps, bs, *e));
-            region_offset += Pages(ps as u32);
-        }
+        let mut file_map = self.build_file_map();
         region_id.map(|region_id| {
             file_map = file_map
                 .iter()
@@ -465,6 +502,11 @@ impl Package {
                 })
                 .collect()
         });
+        file_map = file_map
+            .iter()
+            .filter(|(_, l)| !l.is_empty())
+            .cloned()
+            .collect();
         if file_map.first().is_none_or(|(_, l)| l.is_empty()) {
             Err(std::io::Error::other("Filter not found"))?;
         }
@@ -769,6 +811,9 @@ where
                 region_specs,
                 region_flags,
                 package_files,
+                progress: Arc::new(RangeProgressManager {
+                    registry: std::sync::Mutex::new(Vec::new()),
+                }),
             })
         })()
     })

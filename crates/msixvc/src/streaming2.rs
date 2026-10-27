@@ -1,8 +1,9 @@
 use std::cmp::min;
+use std::cmp::max;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::ops::Div;
+use std::ops::{Deref, Div};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -397,7 +398,7 @@ pub struct GdkMetadata {
 }
 
 impl Package {
-    pub fn get_progress(&self, selectors: Vec<ChunkSelector>) -> Result<(usize, usize, usize)> {
+    pub fn get_progress(&self, selectors: Vec<ChunkSelector>) -> Result<(usize, usize)> {
         let registry = self
             .progress
             .registry
@@ -405,7 +406,23 @@ impl Package {
             .map_err(|_| std::io::Error::other("ukn"))?;
         let file_map = self.build_file_map_for_selector(selectors)?;
 
-        Ok((0, 0, 0))
+        let mut cur = 0;
+        let mut size = 0;
+        for (r, _) in file_map {
+            let mmin = r.offset.to_bytes().0 as usize;
+            let mmax = mmin + r.length.to_bytes().0 as usize;
+            size += mmax - mmin;
+            for reg in registry.deref() {
+                let c = reg.cur.load(Ordering::SeqCst);
+                let upper = min(c, mmax);
+                let lower = max(reg.start, mmin);
+                if lower < upper {
+                    cur += upper - lower;
+                }
+            }
+        }
+
+        Ok((cur, size))
     }
 
     pub fn dump(&self) {

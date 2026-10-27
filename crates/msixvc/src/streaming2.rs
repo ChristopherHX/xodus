@@ -85,7 +85,7 @@ fn http_reader(
     });
     let t_progress = progress.clone();
     tokio::spawn(async move {
-        println!("Fetch for data ({start}/{end})");
+        // println!("Fetch for data ({start}/{end})");
         let stall_timeout = Duration::from_secs(5);
         let mut v = start;
         let urls_len: usize = urls.len();
@@ -641,7 +641,7 @@ impl Package {
 
         let _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length))?;
-            let byte_len = 256 * 4096 * 4096;
+            let byte_len = 1 * 1024 * 1024;
             let mut buf = bytes::BytesMut::with_capacity(byte_len);
             buf.resize(byte_len, 0);
             for (region, files) in file_map {

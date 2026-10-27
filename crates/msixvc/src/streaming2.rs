@@ -1,5 +1,5 @@
-use std::cmp::min;
 use std::cmp::max;
+use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -339,7 +339,7 @@ struct RangeProgress {
 }
 
 struct RangeProgressManager {
-    registry: std::sync::Mutex<Vec<RangeProgress>>,
+    registry: std::sync::Mutex<Vec<Arc<RangeProgress>>>,
 }
 
 pub struct Package {
@@ -466,7 +466,7 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_ext(reader, Some(destination), full_key, None, Some(file_name))
+        self.download_ext(reader, Some(destination), full_key, vec![], Some(file_name))
             .await
     }
 
@@ -479,7 +479,7 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_ext(reader, Some(destination), full_key, None, None)
+        self.download_ext(reader, Some(destination), full_key, vec![], None)
             .await
     }
 
@@ -507,6 +507,9 @@ impl Package {
         &self,
         selectors: Vec<ChunkSelector>,
     ) -> Result<Vec<(XvcRegionHeader, Vec<(String, Pages, u64, u64, bool)>)>> {
+        if selectors.is_empty() {
+            return Ok(self.build_file_map());
+        }
         let metadata = if let Some(metadata) = self.package_files.get("Metadata.json") {
             serde_json::from_str::<GdkMetadata>(metadata.as_str())?
         } else {
@@ -581,7 +584,7 @@ impl Package {
         reader: ReaderFactory,
         destination: Option<String>,
         full_key: Option<[u8; 32]>,
-        region_id: Option<XvcRegionId>,
+        selectors: Vec<ChunkSelector>,
         file_name: Option<String>,
     ) -> Result<()>
     where
@@ -593,14 +596,7 @@ impl Package {
         let hashes = self.hashes.clone();
         let layout = self.xvd_header.layout();
         let header = self.xvd_header.clone();
-        let mut file_map = self.build_file_map();
-        region_id.map(|region_id| {
-            file_map = file_map
-                .iter()
-                .filter(|(s, _)| s.region_id == region_id)
-                .cloned()
-                .collect()
-        });
+        let mut file_map = self.build_file_map_for_selector(selectors)?;
         file_name.map(|file_name| {
             file_map = file_map
                 .iter()
@@ -627,6 +623,21 @@ impl Package {
             (file_map.last().unwrap().1.last().unwrap().1.0 as u64
                 + file_map.last().unwrap().1.last().unwrap().2) as u32,
         ) - offset;
+
+        let prog = {
+            let mut registry = self
+                .progress
+                .registry
+                .lock()
+                .map_err(|_| std::io::Error::other("ukn"))?;
+            let prog = Arc::new(RangeProgress {
+                start: offset.to_bytes().0 as usize,
+                cur: AtomicUsize::new(offset.to_bytes().0 as usize),
+                end: (offset + length).to_bytes().0 as usize,
+            });
+            registry.push(prog.clone());
+            prog
+        };
 
         let _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length))?;
@@ -658,6 +669,7 @@ impl Package {
                     while written < ps {
                         let bytes_to_copy = min(buf.len(), ((ps - written) * 4096) as usize);
                         hr.read_full(&mut buf[..bytes_to_copy])?;
+                        prog.cur.fetch_add(bytes_to_copy, Ordering::SeqCst);
                         if fout.is_some() {
                             fout.as_mut().unwrap().write_all(&buf[..bytes_to_copy])?;
                         }
@@ -687,15 +699,21 @@ impl Package {
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_ext(reader, Some(destination), full_key, Some(region_id), None)
-            .await
+        self.download_ext(
+            reader,
+            Some(destination),
+            full_key,
+            vec![ChunkSelector::Chunk(region_id)],
+            None,
+        )
+        .await
     }
 
     pub async fn check_all<ReaderFactory>(&self, reader: ReaderFactory) -> Result<()>
     where
         ReaderFactory: RangeReaderFactory + Send + 'static,
     {
-        self.download_ext(reader, None, None, None, None).await
+        self.download_ext(reader, None, None, vec![], None).await
     }
 }
 

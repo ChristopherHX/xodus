@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use std::vec;
 
 use fs2::available_space;
@@ -140,6 +143,23 @@ pub async fn run(
 
     let full_key = content_key.unpack(&key).expect("failed to unpack");
 
+    let c_token = Arc::new(AtomicBool::new(false));
+    let c_token_progress = c_token.clone();
+    let pkg = Arc::new(pkg);
+    let pkg_progress = pkg.clone();
+    let join_handle = tokio::spawn(async move {
+        let progress_bar = ProgressBar::new(1).with_style(
+            ProgressStyle::with_template("[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})").unwrap()
+            .progress_chars("#>-")
+        );
+        while !c_token_progress.load(Ordering::Acquire) {
+            let (cur, len) = pkg_progress.get_progress(vec![]).unwrap();
+            progress_bar.set_position(cur as u64);
+            progress_bar.set_length(len as u64);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+
     match factory {
         MyReaderFactory::Http(http_reader_factory) => {
             if try_skip_ntfs {
@@ -160,6 +180,9 @@ pub async fn run(
             }
         }
     }
+
+    c_token.store(true, Ordering::Release);
+    join_handle.await.unwrap();
 
     ExitCode::SUCCESS
 }

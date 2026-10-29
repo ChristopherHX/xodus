@@ -12,7 +12,7 @@ use std::time::Duration;
 use aes::cipher::KeyInit;
 use aes::{Aes128Dec, Aes128Enc};
 use bytes::{Bytes, BytesMut};
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
 use reqwest::Client;
 use reqwest::header::RANGE;
@@ -479,10 +479,24 @@ impl Package {
         full_key: Option<[u8; 32]>,
     ) -> Result<()>
     where
-        ReaderFactory: RangeReaderFactory + Send + 'static,
+        ReaderFactory: RangeReaderFactory + Send + 'static + Clone,
     {
-        self.download_ext(reader, Some(destination), full_key, vec![], None)
+                self.download_ext(reader, Some(destination), full_key, vec![], None)
             .await
+        // let mut handles = Vec::new();
+        // for (region, l) in &self.build_file_map() {
+        //     if l.is_empty() {
+        //         continue;
+        //     }
+        //     handles.push(self.download_ext(reader.clone(), Some(destination.clone()), full_key, vec![ChunkSelector::Chunk(region.region_id)], None));
+        // }
+        // // tokio::join!(handles);
+        // for f in handles {
+        //     f.await?;
+        // }
+
+        // Ok(())
+        
     }
 
     fn build_file_map(&self) -> Vec<(XvcRegionHeader, Vec<(String, Pages, u64, u64, bool)>)> {
@@ -512,8 +526,8 @@ impl Package {
         if selectors.is_empty() {
             return Ok(self.build_file_map());
         }
-        let metadata = if let Some(metadata) = self.package_files.get("Metadata.json") {
-            serde_json::from_str::<GdkMetadata>(metadata.as_str())?
+        let metadata = if let Some(Ok(metadata)) = self.package_files.get("Metadata.json").map(|metadata|serde_json::from_str::<GdkMetadata>(metadata.as_str())) {
+            metadata
         } else {
             GdkMetadata {
                 install_features: vec![],
@@ -643,7 +657,7 @@ impl Package {
 
         let _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut hr = HashedReader::new(&reader, &hashes, &layout, offset, Some(length))?;
-            let byte_len = 1 * 1024 * 1024;
+            let byte_len = 1 * 4 * 1024;
             let mut buf = bytes::BytesMut::with_capacity(byte_len);
             buf.resize(byte_len, 0);
             for (region, files) in file_map {
@@ -1088,7 +1102,7 @@ impl<'t> HashedReader<'t> {
         ReaderFactory: RangeReaderFactory,
     {
         let xvc_info_reader = {
-            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(4);
+            let (out_io, in_prov_valid) = mpsc::channel::<Bytes>(20);
             reader.new(
                 out_io,
                 data_start.to_bytes().0 as usize,
@@ -1119,7 +1133,7 @@ impl<'t> HashedReader<'t> {
         .to_bytes()
         .0 as usize;
         let hash_reader = {
-            let (hash_io, in_hash) = mpsc::channel::<Bytes>(2);
+            let (hash_io, in_hash) = mpsc::channel::<Bytes>(10);
             reader.new(
                 hash_io,
                 hash_bytes_start,

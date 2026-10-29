@@ -221,6 +221,7 @@ pub trait RangeReaderFactory {
     fn new(&self, out_io: Sender<Bytes>, start: usize, end: usize) -> JoinHandle<Result<()>>;
 }
 
+#[derive(Clone)]
 pub struct FileReaderFactory {
     pub path: String,
 }
@@ -241,6 +242,7 @@ impl RangeReaderFactory for FileReaderFactoryStub {
     }
 }
 
+#[derive(Clone)]
 pub struct HttpReaderFactory {
     pub client: Client,
     pub urls: Vec<String>,

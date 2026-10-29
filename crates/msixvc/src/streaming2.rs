@@ -327,7 +327,8 @@ where
     {
         let mut sha = sha2::Sha256::new();
         sha.update(&lower_hashs[i * 4096..(i + 1) * 4096]);
-        if sha.finalize()[0..20] != c.block_hash {
+        let h = sha.finalize();
+        if h[0..20] != c.block_hash || u32::from_le_bytes(h[20..24].try_into()?) != c.unit {
             Err(std::io::Error::other("Hash Table Mismatch"))?;
         }
     }
@@ -496,8 +497,7 @@ impl Package {
         // }
 
         // Ok(())
-        
-    }
+            }
 
     fn build_file_map(&self) -> Vec<(XvcRegionHeader, Vec<(String, Pages, u64, u64, bool)>)> {
         let mut region_headers: &[XvcRegionHeader] = &self.region_headers;
@@ -526,7 +526,11 @@ impl Package {
         if selectors.is_empty() {
             return Ok(self.build_file_map());
         }
-        let metadata = if let Some(Ok(metadata)) = self.package_files.get("Metadata.json").map(|metadata|serde_json::from_str::<GdkMetadata>(metadata.as_str())) {
+        let metadata = if let Some(Ok(metadata)) = self
+.package_files
+.get("Metadata.json")
+.map(|metadata| serde_json::from_str::<GdkMetadata>(metadata.as_str()))
+{
             metadata
         } else {
             GdkMetadata {
@@ -666,6 +670,7 @@ impl Package {
                 } else {
                     None
                 };
+hr.encypted = region.key_id.is_encrypted();
                 for (entry, o, ps, bs, e) in files {
                     hr.assert_position(o.to_bytes().0 as usize);
                     let mut fout = if destination.is_some() {
@@ -1088,6 +1093,7 @@ struct HashedReader<'t> {
     l1_hash_offset: usize,
     stream_pos: usize,
     decryption: Option<DecryptionsRuntime>,
+encypted: bool,
 }
 
 impl<'t> HashedReader<'t> {
@@ -1158,6 +1164,7 @@ impl<'t> HashedReader<'t> {
             l1_hash_offset: hash_pages_l1_index,
             stream_pos: data_start.to_bytes().0 as usize,
             decryption: None,
+encypted: true,
         };
         xvc_info_reader.fetch_next_l0_hash()?;
 
@@ -1225,7 +1232,10 @@ impl<'t> HashedReader<'t> {
                         r.copy_from_slice(&page[l.len()..]);
                     });
                 }
-                if sha.finalize()[0..20] != c.block_hash {
+                let h = sha.finalize();
+                if h[0..20] != c.block_hash
+                    || !self.encypted && u32::from_le_bytes(h[20..24].try_into()?) != c.unit
+{
                     Err(std::io::Error::other(format!(
                         "SHA Mismatch at {}",
                         self.stream_pos
@@ -1260,7 +1270,8 @@ impl<'t> HashedReader<'t> {
         });
         let mut sha = sha2::Sha256::new();
         sha.update(&self.hash_buffer);
-        if sha.finalize()[0..20] != c.block_hash {
+        let h = sha.finalize();
+        if h[0..20] != c.block_hash || u32::from_le_bytes(h[20..24].try_into()?) != c.unit {
             Err(std::io::Error::other(format!(
                 "SHA Mismatch HT! at expect follow up warnings {}",
                 self.stream_pos

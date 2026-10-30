@@ -27,9 +27,10 @@ use crate::crypt::{TweakGenerator, decrypt_page_xts};
 use crate::layout::{PAGE_SIZE, Pages};
 use crate::models::xvd::layout::{HASH_ENTRY_LENGTH, HashTreeLevel, XvdLayout};
 use crate::models::xvd::{
-    HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionHeader, XvcRegionId, XvcRegionSpecifier, XvdHashEntry,
-    XvdHeader, XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
-    XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    HASH_ENTRIES_IN_PAGE, XvcInfo, XvcRegionFlags, XvcRegionHeader, XvcRegionId,
+    XvcRegionSpecifier, XvdHashEntry, XvdHeader, XvdSegmentMetadataHeader,
+    XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags, XvdUserDataHeader,
+    XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -412,6 +413,10 @@ impl Package {
         let mut cur = 0;
         let mut size = 0;
         for (r, _) in file_map {
+            if r.flags.contains(XvcRegionFlags::ON_DEMAND) {
+                continue;
+            }
+
             let mmin = r.offset.to_bytes().0 as usize;
             let mmax = mmin + r.length.to_bytes().0 as usize;
             size += mmax - mmin;
@@ -422,6 +427,9 @@ impl Package {
                 if lower < upper {
                     cur += upper - lower;
                 }
+            }
+            if r.flags.contains(XvcRegionFlags::PREVIEW) {
+                break;
             }
         }
 
@@ -732,9 +740,31 @@ impl Package {
 
     pub async fn check_all<ReaderFactory>(&self, reader: ReaderFactory) -> Result<()>
     where
-        ReaderFactory: RangeReaderFactory + Send + 'static,
+        ReaderFactory: RangeReaderFactory + Send + 'static + Clone,
     {
-        self.download_ext(reader, None, None, vec![], None).await
+        // self.download_ext(reader, None, None, vec![], None).await
+        let mut handles = Vec::new();
+        for (region, l) in &self.build_file_map() {
+            if l.is_empty() || region.flags.contains(XvcRegionFlags::ON_DEMAND) {
+                continue;
+            }
+            handles.push(self.download_ext(
+                reader.clone(),
+                None,
+                None,
+                vec![ChunkSelector::Chunk(region.region_id)],
+                None,
+            ));
+            if region.flags.contains(XvcRegionFlags::PREVIEW) {
+                break;
+            }
+        }
+        // tokio::join!(handles);
+        for f in handles {
+            f.await?;
+        }
+
+        Ok(())
     }
 }
 

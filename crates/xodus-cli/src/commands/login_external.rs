@@ -32,8 +32,12 @@ async fn resolve_browser(start_url: &str, target_url: &str) -> String {
                 println!("error {e}");
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let con: ff_rdp_core::RdpConnection =
-                    ff_rdp_core::connection::RdpConnection::connect("localhost", 6000, Duration::from_secs(30))
-                        .unwrap();
+                    ff_rdp_core::connection::RdpConnection::connect(
+                        "localhost",
+                        6000,
+                        Duration::from_secs(30),
+                    )
+                    .unwrap();
                 transport = con.into_transport();
                 let tabs = ff_rdp_core::RootActor::list_tabs(&mut transport).unwrap();
                 tab = tabs.first().unwrap();

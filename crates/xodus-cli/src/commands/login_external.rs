@@ -17,8 +17,8 @@ async fn resolve_browser(start_url: &str, target_url: &str) -> String {
             .unwrap();
     let mut transport = con.into_transport();
     let tabs = ff_rdp_core::RootActor::list_tabs(&mut transport).unwrap();
-    let tab = tabs.first().unwrap();
-    let a = ff_rdp_core::TabActor::get_target(&mut transport, &tab.actor).unwrap();
+    let mut tab = tabs.first().unwrap();
+    let mut a = ff_rdp_core::TabActor::get_target(&mut transport, &tab.actor).unwrap();
     let mut wait_for_change = if a.url.is_none() || a.url.as_ref().unwrap() != start_url {
         ff_rdp_core::WindowGlobalTarget::navigate_to(&mut transport, &a.actor, start_url).unwrap();
         true
@@ -27,11 +27,29 @@ async fn resolve_browser(start_url: &str, target_url: &str) -> String {
     };
 
     loop {
-        let Ok(Some(url)) = ff_rdp_core::WindowGlobalTarget::current_url(&mut transport, &a.actor)
-        else {
-            continue;
+        let url = match ff_rdp_core::WindowGlobalTarget::current_url(&mut transport, &a.actor) {
+            Err(e) => {
+                println!("error {e}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let con: ff_rdp_core::RdpConnection =
+                    ff_rdp_core::connection::RdpConnection::connect("localhost", 6000, Duration::from_secs(30))
+                        .unwrap();
+                transport = con.into_transport();
+                let tabs = ff_rdp_core::RootActor::list_tabs(&mut transport).unwrap();
+                tab = tabs.first().unwrap();
+                a = ff_rdp_core::TabActor::get_target(&mut transport, &tab.actor).unwrap();
+                continue;
+            }
+            Ok(Some(url)) => url,
+            Ok(None) => {
+                println!("error none");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
         };
         if wait_for_change && a.url.as_ref().is_some() && url == *a.url.as_ref().unwrap() {
+            println!("{url}");
+            tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         }
         wait_for_change = false;
@@ -40,6 +58,7 @@ async fn resolve_browser(start_url: &str, target_url: &str) -> String {
         }
     }
 
+    println!("read data");
     loop {
         let response = ff_rdp_core::WebConsoleActor::evaluate_js_async(
             &mut transport,
@@ -49,6 +68,8 @@ async fn resolve_browser(start_url: &str, target_url: &str) -> String {
         .unwrap();
         let j = response.result.to_json();
         let Some(s) = j.as_str() else {
+            println!("failed to read");
+            tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         };
         return s.to_owned();

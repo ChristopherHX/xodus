@@ -57,12 +57,11 @@ async fn resolve_browser(start_url: &str, target_url: &str) -> String {
 
 #[cfg(feature = "chromeium")]
 async fn resolve_browser(start_url: &str, target_url: &str) -> String {
-    use std::time::Duration;
     use chromiumoxide::Browser;
     use futures_util::StreamExt;
+    use std::time::Duration;
     let (browser, mut handler) = Browser::connect("http://localhost:6000").await.unwrap();
     tokio::task::spawn(async move {
-
         while let Some(h) = handler.next().await {
             if h.is_err() {
                 break;

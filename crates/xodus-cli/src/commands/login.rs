@@ -39,7 +39,13 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
     };
 
     for token in issued_tokens {
-        let address = token.applies_to.as_ref().unwrap().endpoint_reference.address.clone();
+        let address = token
+            .applies_to
+            .as_ref()
+            .unwrap()
+            .endpoint_reference
+            .address
+            .clone();
         let token = token.into();
         let address = if let secrets::Token::Legacy(legacy) = &token {
             legacy.key_name.clone().unwrap_or(address)

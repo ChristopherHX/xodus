@@ -139,7 +139,13 @@ pub async fn do_sisu(
     };
 
     if let Some(sts) = collection.security_tokens.pop() {
-        let address = sts.applies_to.endpoint_reference.address.clone();
+        let address = sts
+            .applies_to
+            .as_ref()
+            .unwrap()
+            .endpoint_reference
+            .address
+            .clone();
         let sts: Token = sts.into();
         let address = if let Token::Legacy(legacy) = &sts {
             legacy.key_name.clone().unwrap_or(address)

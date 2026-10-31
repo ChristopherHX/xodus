@@ -9,3 +9,5 @@ pub mod logout;
 pub mod run;
 pub mod splicense;
 pub mod streaming;
+#[cfg(any(feature = "chromeium", feature = "firefox"))]
+mod login_external;

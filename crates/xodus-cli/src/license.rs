@@ -24,8 +24,8 @@ pub async fn get_license(
         client,
         dev_token.clone(),
         "{d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_string(),
-        "www.microsoft.com".to_owned(),
-        Some(soap::PolicyReference::mbi_ssl()),
+        "scope=service::www.microsoft.com::mbi_ssl&uaid=411DB533-6AEF-4B99-8C15-95B6E1C5A2EA&clientid={d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_owned(),
+        Some(soap::PolicyReference::token_broker()),
     )
     .await
     .unwrap();
@@ -39,8 +39,8 @@ pub async fn get_license(
         Some("Silent".to_string()),
         "{d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_string(),
         &[(
-            "www.microsoft.com".to_owned(),
-            Some(soap::PolicyReference::mbi_ssl()),
+            "scope=service::www.microsoft.com::mbi_ssl&uaid=411DB533-6AEF-4B99-8C15-95B6E1C5A2EA&clientid={d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_owned(),
+            Some(soap::PolicyReference::token_broker()),
         )],
     )
     .await
@@ -48,7 +48,7 @@ pub async fn get_license(
 
     let ms_device_token: Token = ms_device_token.into();
     let Token::Compact(ms_device_token) = ms_device_token else {
-        return Err("Unsupported token".to_string());
+        return Err("Unsupported token 2".to_string());
     };
 
     let user_token: Token = match user_token {
@@ -66,8 +66,10 @@ pub async fn get_license(
         )) => (*token).into(),
         _ => unreachable!("Only responses are handled"),
     };
-    let Token::Compact(user_token) = user_token else {
-        return Err("Unsupported token".to_string());
+    let user_token = match user_token {
+        Token::Compact(t) => t,
+        Token::DelegatedCompact(t) => t,
+        _ => unreachable!(),
     };
 
     let (_content, game_license) = xodus::licensing::content::get_license_content(

@@ -159,10 +159,10 @@ mod test {
         .unwrap();
 
         let ms_device_token: Token = resp.into();
-        let Token::Compact(ms_device_token) = ms_device_token else {
+        let Token::DelegatedCompact(ms_device_token) = ms_device_token else {
             todo!("Unsupported token");
         };
 
-        println!("{}", ms_device_token);
+        println!("d={}", ms_device_token);
     }
 }

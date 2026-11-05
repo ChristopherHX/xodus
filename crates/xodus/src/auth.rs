@@ -152,11 +152,13 @@ pub async fn do_sisu(
     }
     let token: soap::RequestSecurityTokenResponse = collection.security_tokens.remove(0);
     let token: Token = token.into();
-    let Token::Compact(user_token) = token else {
-        return Err(Box::new(std::io::Error::new(
+    let user_token = match token {
+        Token::Compact(t) => t,
+        Token::DelegatedCompact(t) => format!("d={t}"),
+        _ => return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             "error",
-        )));
+        ))),
     };
 
     let mut auth = XalAuthenticator::new(

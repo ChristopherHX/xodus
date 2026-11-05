@@ -229,6 +229,7 @@ pub async fn run(
         } else if nt_entry.is_none() {
             nt_entry = Some(unix_path)
         }
+        println!("{suffix}");
 
         env_value.push_str(&format!("{}:{}/{}", fd.1, prefix, suffix))
     }

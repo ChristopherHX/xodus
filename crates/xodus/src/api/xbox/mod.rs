@@ -32,10 +32,10 @@ pub async fn run(
         dev_token,
         None,
         Some("Silent".to_string()),
-        "{d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_string(),
+        "000000004424da1f".to_string(),
         &[(
-            "user.auth.xboxlive.com".to_owned(),
-            Some(soap::PolicyReference::mbi_ssl()),
+            "scope=service::user.auth.xboxlive.com::mbi_ssl&api-version=2.0&clientid=000000004424da1f".to_owned(),
+            Some(soap::PolicyReference::token_broker()),
         )],
     )
     .await
@@ -57,9 +57,10 @@ pub async fn run(
         )) => (*token).into(),
         _ => unreachable!("Only responses are handled"),
     };
-    let Token::Compact(user_token) = user_token else {
-        eprintln!("Unsupported token");
-        panic!("TODO");
+    let user_token = match user_token {
+        Token::Compact(t) => t,
+        Token::DelegatedCompact(t) => format!("d={t}"),
+        _ => unreachable!(),
     };
     let resp = authenticate_xbox_user(client, user_token)
         .await

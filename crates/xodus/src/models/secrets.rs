@@ -27,6 +27,7 @@ pub struct LegacyToken {
 pub enum Token {
     Legacy(LegacyToken),
     Compact(String),
+    DelegatedCompact(String),
 }
 
 impl From<soap::RequestSecurityTokenResponse> for Token {
@@ -58,14 +59,11 @@ impl From<soap::RequestSecurityTokenResponse> for Token {
                     .unwrap()
                     .value,
             ),
-            "urn:passport:delegationcompact" => Self::Compact(format!(
-                "d={}",
-                value
+            "urn:passport:delegationcompact" => Self::DelegatedCompact(value
                     .requested_security_token
                     .binary_security_token
                     .unwrap()
-                    .value
-            )),
+                    .value),
             _ => unreachable!(),
         }
     }

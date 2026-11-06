@@ -155,10 +155,12 @@ pub async fn do_sisu(
     let user_token = match token {
         Token::Compact(t) => t,
         Token::DelegatedCompact(t) => format!("d={t}"),
-        _ => return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "error",
-        ))),
+        _ => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "error",
+            )));
+        }
     };
 
     let mut auth = XalAuthenticator::new(

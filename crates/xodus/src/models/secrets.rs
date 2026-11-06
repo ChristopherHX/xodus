@@ -59,11 +59,13 @@ impl From<soap::RequestSecurityTokenResponse> for Token {
                     .unwrap()
                     .value,
             ),
-            "urn:passport:delegationcompact" => Self::DelegatedCompact(value
+            "urn:passport:delegationcompact" => Self::DelegatedCompact(
+                value
                     .requested_security_token
                     .binary_security_token
                     .unwrap()
-                    .value),
+                    .value,
+            ),
             _ => unreachable!(),
         }
     }

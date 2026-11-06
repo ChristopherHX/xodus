@@ -45,7 +45,7 @@ pub struct PackageFile {
 
 impl Display for PackageFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{} - {}", self.file_name, self.file_size))
+        f.write_fmt(format_args!("{} - {} {}", self.file_name, self.file_size, self.modified_date))
     }
 }
 

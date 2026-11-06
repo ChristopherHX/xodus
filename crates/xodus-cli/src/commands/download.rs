@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::process::ExitCode;
 
 use futures_util::StreamExt;
@@ -8,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
-use crate::package::{get_content_id, get_packages};
+use crate::package::{get_content_id, get_packages, get_packages_ex};
 
 pub async fn run(
     client: &reqwest::Client,
@@ -37,7 +38,11 @@ pub async fn run(
         return ExitCode::FAILURE;
     };
 
-    let Ok(files) = MultiSelect::new("Select files to download", package.package_files)
+    let mut msixvcs = Vec::new();
+    let mut hmap = HashSet::new();
+    resolve_all(client, tokens, &content_id, package, &mut msixvcs, &mut hmap).await;
+
+    let Ok(files) = MultiSelect::new("Select files to download", msixvcs)
         .with_page_size(30)
         .with_validator(|input: &[inquire::list_option::ListOption<&PackageFile>]| {
             if !input.is_empty() {
@@ -96,4 +101,23 @@ pub async fn run(
     println!("ContentID: {content_id}");
 
     ExitCode::SUCCESS
+}
+
+async fn resolve_all(client: &reqwest::Client, tokens: &TokenManager, content_id: &String, package: xodus::models::packagespc::PackageDetails, msixvcs: &mut Vec<PackageFile>, hmap: &mut HashSet<String>) {
+    for pkg in package.package_files {
+        if let Some(version) = pkg.file_name.strip_circumfix("update-", ".xsp") {
+            if hmap.insert(pkg.file_name.clone()) {
+                match get_packages_ex(client, tokens, content_id.clone(), Some(version.to_owned()))
+                    .await
+                {
+                    Ok(pkgs) => {
+                        Box::pin(resolve_all(client, tokens, content_id, pkgs, msixvcs, hmap)).await;
+                    }
+                    Err(_) => msixvcs.push(pkg),
+                }
+            }
+        } else if !msixvcs.iter().any(|v| v.file_name == pkg.file_name){
+            msixvcs.push(pkg);
+        }
+    }
 }

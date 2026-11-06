@@ -74,10 +74,11 @@ pub async fn get_content_id(
     Ok(content_id.to_owned())
 }
 
-pub async fn get_packages(
+pub async fn get_packages_ex(
     client: &reqwest::Client,
     tokens: &TokenManager,
     content_id: String,
+    version: Option<String>,
 ) -> Result<PackageDetails, Box<dyn std::error::Error>> {
     let dev_token = tokens.get_device_sts_token().unwrap();
     let Token::Legacy(dev_token) = dev_token else {
@@ -92,8 +93,11 @@ pub async fn get_packages(
         xodus::api::xbox::run(client, dev_token, legacy, "http://update.xboxlive.com").await;
 
     let response = client
-        .get(format!(
-            "{XBOX_LIVE_PACKAGES_PC}/GetBasePackage/{content_id}"
+        .get(version.map_or_else(
+            || format!("{XBOX_LIVE_PACKAGES_PC}/GetBasePackage/{content_id}"),
+            |version| {
+                format!("{XBOX_LIVE_PACKAGES_PC}/GetSpecificBasePackage/{content_id}/{version}")
+            },
         ))
         .header("x-xbl-contract-version", "3")
         .header(
@@ -112,4 +116,12 @@ pub async fn get_packages(
         )));
     };
     Ok(package)
+}
+
+pub async fn get_packages(
+    client: &reqwest::Client,
+    tokens: &TokenManager,
+    content_id: String,
+) -> Result<PackageDetails, Box<dyn std::error::Error>> {
+    get_packages_ex(client, tokens, content_id, None).await
 }

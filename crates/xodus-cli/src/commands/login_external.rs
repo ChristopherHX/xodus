@@ -12,7 +12,7 @@ use xodus::models::{secrets, soap};
 use xodus::tokens::TokenManager;
 
 const CLIENT_ID: &str = "0000000040159362";
-const USER_AUTH_SCOPE: &str = "scope=service::user.auth.xboxlive.com::MBI_SSL&api-version=2.0&clientid=0000000040159362&ssoappgroup=none";
+const USER_AUTH_SCOPE: &str = "scope=service::user.auth.xboxlive.com::MBI_SSL&api-version=2.0&clientid=0000000040159362";
 
 #[cfg(feature = "firefox")]
 async fn resolve_browser(start_url: &str, target_url: &str) -> DAProperty {
@@ -154,7 +154,9 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
     let device_token = token.clone();
     let client_id = CLIENT_ID.to_string().clone();
     let username = "USERNAME".to_owned();
-    let mut user_token = xodus::models::secrets::LegacyToken {
+    let mut user_token = /*if let Ok(secrets::Token::Legacy(token)) = tokens.get_user_sts_token() {
+        token
+    } else {*/ xodus::models::secrets::LegacyToken {
         key_name: None,
         token: "<EncryptedData xmlns=\"http://www.w3.org/2001/04/xmlenc#\" Id=\"devicesoftware\" Type=\"http://www.w3.org/2001/04/xmlenc#Element\"><EncryptionMethod Algorithm=\"http://www.w3.org/2001/04/xmlenc#tripledes-cbc\"></EncryptionMethod><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:KeyName>http://Passport.NET/STS</ds:KeyName></ds:KeyInfo><CipherData><CipherValue>challenge</CipherValue></CipherData></EncryptedData>".to_owned(),
         binary_secret: None,
@@ -164,14 +166,12 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
             created: "".to_owned(),
             expires: "".to_owned(),
         },
-    };
+    }/*}*/;
 
     let mut scopes = vec![(
         USER_AUTH_SCOPE.to_string(),
         Some(soap::PolicyReference::token_broker()),
     )];
-
-    scopes.push(("http://Passport.NET/tb".to_string(), None));
 
     let mut user_data = None;
 
@@ -205,14 +205,8 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
                 user_data = Some(rdata);
                 continue;
             }
-            ExchangeUserTokenOutcome::Fault(_) => {
-                return ExitCode::FAILURE;
-            }
-            ExchangeUserTokenOutcome::Issued(
-                soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
-            ) => {
-                let token = collection.security_tokens.remove(0);
-                if let Some(pp) = &token.pp {
+            ExchangeUserTokenOutcome::Fault(pp) => {
+                if let Some(pp) = &pp {
                     if pp.inline_auth_url.as_deref().is_some() {
                         println!("login url: {}", pp.inline_auth_url.as_deref().unwrap());
                         println!(
@@ -228,17 +222,20 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
                         user_data = Some(rdata);
                         continue;
                     }
-                    println!("error {}", pp.error_status.as_ref().unwrap());
                     println!("rstatus {}", pp.req_status.as_ref().unwrap());
                     println!("payload {}", quick_xml::se::to_string(pp).unwrap());
                     println!("Failure");
                     return ExitCode::FAILURE;
                 }
+                return ExitCode::FAILURE;
+            }
+            ExchangeUserTokenOutcome::Issued(
+                soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
+            ) => {
+                let token = collection.security_tokens.remove(0);
                 for token in collection.security_tokens {
                     let address = token
                         .applies_to
-                        .as_ref()
-                        .unwrap()
                         .endpoint_reference
                         .address
                         .clone();
@@ -262,6 +259,7 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
             Token::Legacy(legacy_token) => println!("legacy {}", legacy_token.token),
             Token::Compact(c) => println!("compact {c}"),
         }
+        tokens.save_user_token("http://Passport.NET/tb".to_string(), Token::Legacy(user_token)).unwrap();
         user_data.map(|user_data| {
             tokens
                 .save_user(&xodus::models::secrets::User {
